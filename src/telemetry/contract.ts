@@ -60,12 +60,10 @@ export const EVENTS: Record<string, ReadonlySet<string>> = {
    *  signup failed travels as a category and never as the error's own words. */
   brain_signup_settled: new Set<string>(['outcome', 'duration_bucket']),
   /** One closed agent session, summarised. `graft_reads` vs `source_reads` is
-   *  the single number that says whether an agent prefers graft to grep; the two
-   *  `*_turns` buckets are the follow-up question — of the turns that used graft,
-   *  how many told the user what it saved. Both are counts of turns, never text. */
+   *  the single number that says whether an agent prefers graft to grep. Both
+   *  are counts, never text. */
   session_summary: new Set<string>([
-    'graft_reads_bucket', 'source_reads_bucket', 'saved_tokens_bucket',
-    'graft_turns_bucket', 'reported_turns_bucket',
+    'graft_reads_bucket', 'source_reads_bucket',
   ]),
 };
 
@@ -197,17 +195,6 @@ export function countBucket(n: number): string {
   if (n < 50) return '20-49';
   if (n < 200) return '50-199';
   return '200+';
-}
-
-/** Estimated tokens saved in one session — the README's central claim, in the
- *  only resolution we need to defend it. */
-export function savedTokensBucket(n: number): string {
-  if (n <= 0) return '0';
-  if (n < 1000) return '<1k';
-  if (n < 5000) return '1-5k';
-  if (n < 20000) return '5-20k';
-  if (n < 100000) return '20-100k';
-  return '100k+';
 }
 
 /**

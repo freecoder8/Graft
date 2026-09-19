@@ -13,12 +13,12 @@ test('empty settings gets the full Graft blocks', () => {
   for (const e of ['PostToolUse', 'UserPromptSubmit', 'SessionStart', 'Stop']) {
     assert.ok(merged.hooks[e][0].hooks[0].command.includes('graft-hooks.cjs'), `${e} wired`);
   }
-  // PostToolUse carries a second graft block: the usage-mix + tokens-saved
-  // accumulator over the retrieval tools (Bash `graft …`, the graft_* MCP tools)
-  // and the source-read tools (Read/Grep/Glob) it scores against.
-  const savings = merged.hooks.PostToolUse[1];
-  assert.equal(savings.matcher, 'Bash|mcp__graft__|Read|Grep|Glob');
-  assert.ok(savings.hooks[0].command.includes('tool-savings'), 'savings hook wired');
+  // PostToolUse carries a second graft block: the usage-mix scorer over the
+  // retrieval tools (Bash `graft …`, the graft_* MCP tools) and the source-read
+  // tools (Read/Grep/Glob) it scores against.
+  const mix = merged.hooks.PostToolUse[1];
+  assert.equal(mix.matcher, 'Bash|mcp__graft__|Read|Grep|Glob');
+  assert.ok(mix.hooks[0].command.includes('tool-use'), 'usage-mix hook wired');
   assert.ok(merged.footerLinksRegexes.includes('graft/[\\w./-]+\\.md'));
   assert.deepEqual(warnings, []);
 });
@@ -81,7 +81,7 @@ test('GRAFT_NO_STATUSLINE=1 skips installing a statusLine', () => {
 test('existing foreign hooks are preserved; Graft appended', () => {
   const existing = { hooks: { PostToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'mine.sh' }] }] } };
   const { merged } = mergeGraftSettings(existing);
-  // foreign block + graft's two PostToolUse blocks (post-edit, tool-savings).
+  // foreign block + graft's two PostToolUse blocks (post-edit, tool-use).
   assert.equal(merged.hooks.PostToolUse.length, 3);
   assert.equal(merged.hooks.PostToolUse[0].hooks[0].command, 'mine.sh');
   assert.ok(merged.hooks.PostToolUse[1].hooks[0].command.includes('graft-hooks.cjs'));

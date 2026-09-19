@@ -8,7 +8,6 @@ import {
   commandInvokesGraft,
   isGraftMcpTool,
   isMcpToolName,
-  parseSavings,
   recordToolUse,
   latestSession,
   formatSessionStats,
@@ -92,47 +91,27 @@ test('commandInvokesGraft is anchored — not fooled by a substring path', () =>
   assert.ok(!commandInvokesGraft('echo upgraft'));
 });
 
-// ── parseSavings ───────────────────────────────────────────────────────────
-
-test('parseSavings sums every footer, tolerant of commas', () => {
-  assert.equal(parseSavings('nothing here'), 0);
-  assert.equal(parseSavings('[graft] tokens saved ≈ 2,181 (89%) — …'), 2181);
-  assert.equal(
-    parseSavings('a\n[graft] tokens saved ≈ 100 — …\nb\n[graft] tokens saved ≈ 1,000 — …'),
-    1100,
-  );
-});
-
 // ── recordToolUse ──────────────────────────────────────────────────────────
 
-test('recordToolUse increments the right counter and accumulates savings', () => {
+test('recordToolUse increments the right counter', () => {
   const d = fresh();
-  recordToolUse(d, 's1', { kind: 'graft', savedTokens: 500 });
+  recordToolUse(d, 's1', { kind: 'graft' });
   recordToolUse(d, 's1', { kind: 'graft' });
   recordToolUse(d, 's1', { kind: 'source' });
   const s = readSession(d, 's1');
   assert.equal(s.graftReads, 2);
   assert.equal(s.sourceReads, 1);
-  assert.equal(s.savedTokens, 500);
 });
 
 test('recordToolUse is a no-op when there is nothing to record (no file written)', () => {
   const d = fresh();
-  recordToolUse(d, 's1', { kind: null, savedTokens: 0 });
+  recordToolUse(d, 's1', { kind: null });
   recordToolUse(d, 's1', {});
   // readSession returns the empty default without a file; the proof it never
   // wrote is that a fresh empty session equals what we read.
   const s = readSession(d, 's1');
   assert.equal(s.graftReads, 0);
   assert.equal(s.sourceReads, 0);
-  assert.equal(s.savedTokens, 0);
-});
-
-test('recordToolUse can log savings on a graft read with no explicit kind classification', () => {
-  const d = fresh();
-  recordToolUse(d, 's1', { kind: 'graft', savedTokens: 1990 });
-  assert.equal(readSession(d, 's1').savedTokens, 1990);
-  assert.equal(readSession(d, 's1').graftReads, 1);
 });
 
 test('recordToolUse stamps the host once — the first tool use owns the attribution', () => {
@@ -167,44 +146,18 @@ test('latestSession picks the most recently touched session file', () => {
   assert.equal(s.graftReads, 8);
 });
 
-test('formatSessionStats renders the mix, savings and last query', () => {
+test('formatSessionStats renders the mix and last query', () => {
   const out = formatSessionStats({
     id: 'abc', lastQuery: 'where is auth', perAgentQuery: {},
-    graftReads: 8, sourceReads: 2, savedTokens: 12345,
+    graftReads: 8, sourceReads: 2,
   });
   assert.match(out, /session abc/);
   assert.match(out, /graft reads:\s+8/);
   assert.match(out, /source reads:\s+2/);
   assert.match(out, /80% graft/);
-  assert.match(out, /12,345/);
   assert.match(out, /where is auth/);
 });
 
 test('formatSessionStats has a friendly empty state', () => {
   assert.match(formatSessionStats(null), /no session recorded yet/);
-});
-
-test('formatSessionStats prices the saving once the session has been billed', () => {
-  // Billed $0.60 for 1M input tokens = $0.60/Mtok, so 100k saved is worth $0.06 —
-  // which formats as <$0.01? No: $0.06. The point is that it is the MEASURED
-  // rate, an order of magnitude under this model's $5/Mtok list price.
-  const out = formatSessionStats({
-    id: 'abc', lastQuery: null, perAgentQuery: {},
-    graftReads: 8, sourceReads: 2, savedTokens: 100_000,
-    inputCostMicros: 600_000, inputTokensBilled: 1_000_000,
-  });
-  assert.match(out, /tokens saved:\s+~100,000/);
-  assert.match(out, /value saved:\s+~\$0\.06/);
-});
-
-test('formatSessionStats omits the dollar line rather than claiming zero', () => {
-  // Cursor: its hooks name no transcript, so nothing has ever been billed. The
-  // token count still stands; a "$0.00" next to it would be a false claim.
-  const out = formatSessionStats({
-    id: 'abc', lastQuery: null, perAgentQuery: {},
-    graftReads: 8, sourceReads: 2, savedTokens: 100_000,
-  });
-  assert.match(out, /tokens saved:\s+~100,000/);
-  assert.doesNotMatch(out, /value saved/);
-  assert.doesNotMatch(out, /\$/);
 });

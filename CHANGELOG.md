@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+### Removed
+
+- **The "tokens saved" / "money saved" reporting is gone** — the
+  `[graft] tokens saved ≈ N` line every retrieval opened with, the per-turn nudge
+  asking the agent to tally it, the statusline's `~N tok saved · ~$X` segment, and
+  `graft stats`' savings lines. `ask --json` no longer carries a `saved` baseline,
+  and neither do `callers --json` or `grep`'s result object.
+- **`session_summary` no longer sends `saved_tokens_bucket`,
+  `graft_turns_bucket` or `reported_turns_bucket`**: those measured the reporting
+  itself, so they went with it. `graft_reads_bucket` / `source_reads_bucket`
+  (which did the agent reach for) stay.
+- **The Claude Code `tool-savings` hook event is now `tool-use`**; the old name is
+  still accepted, so settings.json files installed by earlier versions keep
+  scoring the usage mix.
+- `src/context/savings.ts`, `src/context/price.ts`, `src/claude/tally.ts` and
+  `scripts/tally-audit.mjs` are deleted with their tests, and the README's
+  token/$ benchmark tables are scrubbed to the correctness and speed results.
+
 ### Fixed
 
 - **Thinking-mode endpoints negotiate the forced `tool_choice` 400**: an

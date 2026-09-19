@@ -2,7 +2,7 @@
 
 <img src="assets/graft-hero.png" alt="Graft — open-source context layer for large codebases" width="100%"/>
 
-### Turbocharge Claude Code, Cursor, Codex, Gemini & every coding agent: faster, cheaper, with contextual understanding specific to your codebase.
+### Turbocharge Claude Code, Cursor, Codex, Gemini & every coding agent: faster and more correct, with contextual understanding specific to your codebase.
 
 <a href="https://trendshift.io/repositories/92209?utm_source=trendshift-badge&utm_medium=badge&utm_campaign=badge-trendshift-92209" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/92209/daily?language=TypeScript" alt="trailhq/Graft | Trendshift" width="250" height="55"/></a>
 
@@ -20,12 +20,11 @@
   <a href="https://app.trailhq.com/get-started?step=pick"><img src="https://img.shields.io/badge/Trail%20Brain-try%20it-E5484D?style=for-the-badge&logoColor=white" /></a>
 </p>
 
-### Up to **4× cheaper** and **3× faster**, with better or no loss of correctness.
+### Up to **3× faster**, with better or no loss of correctness.
 
 | Metric | Cold Claude Code | Claude Code with graft |
 |---|---|---|
 | Tool-call reduction | Baseline | **+46%** |
-| Token savings | Baseline | **+42%** |
 | Time savings | Baseline | **+60%** |
 | Correctness | 54% | **66% (+12 pts)** |
 
@@ -38,10 +37,6 @@
 
 <p align="center">
   <a href="https://app.trailhq.com/get-started?step=pick"><img src="https://img.shields.io/badge/Try%20Trail%20Brain%20%E2%86%92-E5484D?style=for-the-badge" alt="Try Trail Brain" height="34"/></a>
-</p>
-
-<p align="center">
-  <img src="assets/graft-comparison-demo.gif" alt="Side-by-side comparison of a coding agent working with and without graft" width="820"/>
 </p>
 
 ---
@@ -119,27 +114,18 @@ Graft builds that understanding **once** and writes it into your repo as a folde
 - **Always fresh, automatically.** Every query rebuilds the graph against the working tree first — structural, `$0`, ~3ms when nothing moved — so `ask`/`grep`/`callers`/`skeleton`/`map` describe the code as it is right now, including uncommitted edits. `graft check` is a local freshness signal; there's no stale index to babysit.
 - **Your provider, your key, your model.** Summaries are written by any provider you choose — OpenAI, Anthropic (native), OpenRouter, Fireworks, Groq, OrcaRouter, a LiteLLM proxy, or a local model — under your own key. The structural code graph (`graft build`, `graft check`) is deterministic tree-sitter and never calls a model at all.
 
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/graft-cold-vs-graft-dark.png">
-    <img src="assets/graft-cold-vs-graft.png" alt="The same task, 'fix the auth bug', run two ways. A cold Claude Code session re-reads the repo and wanders file to file; Claude Code + graft loads its map once and rides the hooks to one clean pass. With Graft: 46% fewer tool calls, 42% fewer tokens, 60% less time, +22% more SWE-bench instances resolved." width="880"/>
-  </picture>
-</p>
-
 ---
 
 ## Benchmark
 
-An agent that reads the graph should be cheaper and faster without getting more answers wrong. That's the whole claim, so we measured it instead of asserting it.
+An agent that reads the graph should be faster without getting more answers wrong. That's the whole claim, so we measured it instead of asserting it.
 
-The harness ran three variants of the same Claude Sonnet 5 agent with the same file tools: **cold** (explores from zero), **Graft** (a `graft ask --source` bundle pushed up front), and **pull** (graft_find_code/graft_file_api tools, nothing injected — context paid for only when asked). An Opus 4.8 judge scored correctness with a required-keyword floor, so a fast-but-wrong answer couldn't win by being fast. Cost is cache-aware: reads ≈0.1×, writes 1.25×, the billing model agents actually run under.
+The harness ran three variants of the same Claude Sonnet 5 agent with the same file tools: **cold** (explores from zero), **Graft** (a `graft ask --source` bundle pushed up front), and **pull** (graft_find_code/graft_file_api tools, nothing injected — context paid for only when asked). An Opus 4.8 judge scored correctness with a required-keyword floor, so a fast-but-wrong answer couldn't win by being fast.
 
 162 runs, two repos (graft itself and a real Node/Express auth service), 3 trials each, tasks split between single-file and multi-file questions.
 
 | Metric (mean/task) | Cold Claude Code | Claude Code with graft |
 |---|---|---|
-| Cost savings ($) | 0.0429 | **0.0292 (+32%)** |
-| Token savings | 8,070 | **4,650 (+42%)** |
 | Tool-call savings | 4.2 | **2.3 (+46%)** |
 | Latency savings (s) | 39.8 | **15.8 (+60%)** |
 | Correctness | 93% | 93% (equal) |
@@ -157,17 +143,15 @@ The sweep above is our harness measuring our mechanism. So we ran the industry-s
 | Correctness & efficiency | Cold Claude Code | Claude Code with graft | Improvement |
 |---|---|---|---|
 | Correctness | 27 / 50 (54%) | **33 / 50 (66%)** | **+12 pts** |
-| Token savings | 142.0M | **109.4M** | **+23%** |
-| Cost savings | $52.34 | **$42.43** | **+19%** |
 | Tool-call savings | 1,370 | **1,031** | **+25%** |
 | API-request savings | 2,455 | **1,875** | **+24%** |
 | Wall-clock savings | 13,094s | **8,922s** | **+32%** |
 
-graft resolved **33 of 50 instances** against Cold Claude Code's 27 — and got there with 25% fewer tool calls, 23% fewer tokens, and 32% less wall-clock time. Every correctness win has the same shape: the baseline patches one file and misses its siblings. On `django-11532` it patched 1 of the 5 files the fix requires and broke 18 previously-passing tests, twice over. On `django-16263` it patched 1 of 4 and scored 102 / 103. graft found the rest — and on `django-16263` did it in half the tokens and half the time.
+graft resolved **33 of 50 instances** against Cold Claude Code's 27 — and got there with 25% fewer tool calls and 32% less wall-clock time. Every correctness win has the same shape: the baseline patches one file and misses its siblings. On `django-11532` it patched 1 of the 5 files the fix requires and broke 18 previously-passing tests, twice over. On `django-16263` it patched 1 of 4 and scored 102 / 103. graft found the rest — and on `django-16263` did it in half the time.
 
-Two harnesses, two claims: the controlled sweep says graft is cheaper and faster, SWE-bench says it's also more correct.
+Two harnesses, two claims: the controlled sweep says graft is faster, SWE-bench says it's also more correct.
 
-<sub>Correctness over all instances; tokens, cost and calls over the instances both arms resolved, for a like-for-like comparison. Official SWE-bench Verified images and official `swebench` 4.1.0 grader, native x86_64.</sub>
+<sub>Correctness over all instances; calls and wall-clock over the instances both arms resolved, for a like-for-like comparison. Official SWE-bench Verified images and official `swebench` 4.1.0 grader, native x86_64.</sub>
 
 ---
 
@@ -187,9 +171,9 @@ flowchart LR
     P2 --> N["graft/*.md<br/>markdown node graph"]
 ```
 
-Every pass is cached by content hash — the LLM ones and the tree-sitter parse alike. Re-running only touches the files that changed, so the second build is fast and cheap (on this repo, 124 files: 0.74s cold, 0.18s after one edited file, 0.18s with nothing changed). `graft build --no-reuse` forces a cold re-parse.
+Every pass is cached by content hash — the LLM ones and the tree-sitter parse alike. Re-running only touches the files that changed, so the second build is fast (on this repo, 124 files: 0.74s cold, 0.18s after one edited file, 0.18s with nothing changed). `graft build --no-reuse` forces a cold re-parse.
 
-That cheapness is what lets **every query refresh the graph before it answers**. A retrieval call stats the tree against the last build's fingerprint (~3ms), and rebuilds only if something moved — so `ask`/`grep`/`callers`/`skeleton`/`map` describe the code as it is right now, including edits that are unsaved to git: uncommitted, unstaged, or staged all look the same to graft. Git determines the visible file set; freshness compares the working-tree bytes rather than commit or index state. The refresh is structural and `$0`; it never calls the LLM. Turn it off per-command with `--no-refresh`, or everywhere with `GRAFT_NO_REFRESH=1`.
+That caching is what lets **every query refresh the graph before it answers**. A retrieval call stats the tree against the last build's fingerprint (~3ms), and rebuilds only if something moved — so `ask`/`grep`/`callers`/`skeleton`/`map` describe the code as it is right now, including edits that are unsaved to git: uncommitted, unstaged, or staged all look the same to graft. Git determines the visible file set; freshness compares the working-tree bytes rather than commit or index state. The refresh is structural and `$0`; it never calls the LLM. Turn it off per-command with `--no-refresh`, or everywhere with `GRAFT_NO_REFRESH=1`.
 
 Alongside the markdown graph, `graft build` builds `graft/.graph/wiring.json` — a per-symbol code graph — plus a per-file wiring card mirroring your source tree. Tier 1 is pure tree-sitter (every function, class, and call edge; deterministic, no model, no network), which is why plain `graft build` needs no key. The `--deep` pass adds a one-line summary and a crux excerpt per symbol, cached by body hash.
 
@@ -321,14 +305,9 @@ Where a CLI agent supports user-level `hooks.json`, `init` also installs Graft's
 
 `graft init` always wires up Claude Code, and Claude Code gets more than the skill file above. From then on, any Claude Code session opened in the repo gets:
 
-- **a live statusline** — graph size, % enriched, and a `⚠ N stale` warning when the code has moved ahead of the graph
+- **a live statusline** — graph size and a `⚠ N stale` warning when the code has moved ahead of the graph
 - **auto-sync** — every graft query brings the graph up to date first, so an answer always describes the code as it is right now, uncommitted edits included. A query refreshes only what it reads; the markdown under `graft/` is refreshed by the background rebuild at the end of a turn that touched code. Both are structural and `$0` — auto-sync never calls the LLM on its own
 - **context on tap** — each prompt pulls the matching nodes into the session; editing a file surfaces what depends on it ("blast radius"); new sessions start with the repo map
-
-<p align="center">
-  <img src="assets/graft-hooks-demo.gif" alt="How Claude Code hooks wire graft in: install, graft init, then the hooks loop (session start, user prompt, post tool use, stop) keeps the graph built, read, and committed automatically" width="820"/>
-  <br/><sub>install → init → hooks keep the graph fresh every session</sub>
-</p>
 
 <p align="center">
   <img src="assets/graft-hook-blast-radius-demo.gif" alt="graft's post-edit hook: editing node-file.ts prints its blast radius (who depends on it) inline, the statusline flips stale → syncing → synced on its own, and the same dependents light up in graft viz" width="820"/>
@@ -528,17 +507,16 @@ normalized on load — no regeneration needed.
 
 The [benchmarks](#benchmark) measure the mechanism. The real test is whether graft helps an agent **ship real changes** on code people actually run, not just answer questions. So we benchmark it on popular open-source repos: **15 tasks each**, 10 real developer questions plus **5 actual implementation tasks** (real merged pull requests, each re-implemented from its base commit and scored against the files the maintainers actually changed). Same agent (Claude Opus), same file tools; the only difference is whether graft is wired in.
 
-Across these repos graft runs **up to 4× cheaper and 3× faster**, with better or no loss of correctness: it reproduces the real merged PRs by touching the same files the maintainers did. Per-repo detail below.
+Across these repos graft runs **up to 3× faster**, with better or no loss of correctness: it reproduces the real merged PRs by touching the same files the maintainers did. Per-repo detail below.
 
 ### PocketBase (Go, ~350 files)
 
 | Aggregate over 15 tasks | Standard Claude Code | With graft |
 |---|---|---|
-| Cost | $13.91 | **$11.02 (−21%)** |
 | Wall-clock | 2,044s | **1,762s (−14%)** |
 | PRs reproduced | 5 / 5 | **5 / 5 (same files as the maintainers)** |
 
-Cheaper and faster with no loss of correctness: graft reproduced all five merged PRs, touching the same files the maintainers did. The gap is widest on cross-file understanding — "how does auth work across OAuth2 providers" dropped from $2.19 to $0.84.
+Faster with no loss of correctness: graft reproduced all five merged PRs, touching the same files the maintainers did.
 
 <details>
 <summary><b>The 10 questions we asked</b></summary>

@@ -19,6 +19,6 @@ test('skill template is a well-formed SKILL.md', () => {
   assert.match(body, /graft map/, 'body tells the agent to orient with graft map before exploring');
   assert.match(body, /\[scope\/\]/, 'body teaches the [scope/] label on multi-scope hits');
   assert.match(body, /--in <scope>\//, 'body teaches narrowing with ask --in <scope>/');
-  assert.match(body, /tokens saved/i, 'body references the tokens-saved footer');
-  assert.match(body, /every turn/i, 'body tells the agent to report savings each turn');
+  assert.match(body, /Never pipe a graft command/, 'body keeps the no-head/tail rule');
+  assert.doesNotMatch(body, /tokens saved/i, 'body promises no tokens-saved footer');
 });

@@ -17,7 +17,6 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import matter from "gray-matter";
 import { contextDirFor } from "../context/node-file.js";
-import { withSavings, savingsFor, savingsTurnNudge, type Savings } from "../context/savings.js";
 import { loadGraphCached, loadAskIndexCached } from "../graph/load.js";
 import {
   assertPrefixIndexed,
@@ -108,10 +107,6 @@ export interface AskResult {
    * callers must not re-sort this list by `score`. */
   hits: AskHit[];
   note?: string;
-  /** Token-saving estimate, set only in `--source` (retriever) mode: the whole
-   * size of the distinct files these hits point into, i.e. the baseline cost of
-   * reading them instead of this pack. Computed from file sizes stored at build. */
-  saved?: { files: number; baselineChars: number };
   /** Lexical mode only: share (0..1) of the query's distinct terms the TOP hit
    * matched. A relevance signal for callers that inject packs unprompted (the
    * Claude prompt hook): a low share means the query's words barely overlap the
@@ -135,8 +130,8 @@ export interface AskResult {
   ranking?: AskRankingMetadata;
   /** Rules from the attached Trail brain that govern the symbols in `hits`.
    * Absent when the repo has no brain linked, or when none of its rules touch
-   * this answer. Populated in `--source` mode only, alongside `saved`: a pack
-   * the agent does not read the code from has nothing for a rule to sit beside. */
+   * this answer. Populated in `--source` mode only: a pack the agent does not
+   * read the code from has nothing for a rule to sit beside. */
   rules?: AppliedRule[];
 }
 
@@ -1291,27 +1286,6 @@ function inlineSource(root: string, hits: AskHit[], graph: GraphV1 | null, full:
   }
 }
 
-/** Every repo-relative file path a set of hits points into (dedup). A symbol
- * pointer is `path:span`; a concept pointer is a comma-joined path list. */
-function hitFiles(hits: AskHit[]): Set<string> {
-  const files = new Set<string>();
-  for (const h of hits) {
-    const span = parseSpan(h.pointer);
-    if (span) { files.add(span.path); continue; }
-    for (const p of h.pointer.split(",").map((s) => s.trim()))
-      if (p && !p.includes(" ")) files.add(p);
-  }
-  return files;
-}
-
-/** Baseline = whole size of the files these hits cover, read from the sizes the
- * build stored on each file node. Zero when the graph predates the `chars` field
- * (a pre-upgrade index) — the caller then just omits the estimate. */
-function baselineFor(hits: AskHit[], graph: GraphV1 | null): AskResult["saved"] | undefined {
-  if (!graph) return undefined;
-  return savingsFor(graph, hitFiles(hits));
-}
-
 /** Answer a query from the graft/ graph at `dir`. Deterministic, $0. */
 export function ask(dir: string, query: string, opts: AskOptions = {}): AskResult {
   const root = resolve(dir);
@@ -1387,9 +1361,6 @@ export function ask(dir: string, query: string, opts: AskOptions = {}): AskResul
         opts.full ?? false,
       );
     }
-    // The pack is truly substitutive only in retriever mode (spans inlined), so
-    // the "vs reading whole files" estimate is only honest here.
-    result.saved = baselineFor(result.hits, corpus.graph);
     // What the team decided about the code this pack just inlined. Read from the
     // local cache only — `ask` is on the agent's hot path and must never wait on
     // the network; `graft brain pull` and `init` are what refresh it.
@@ -1428,8 +1399,6 @@ export interface SkeletonResult {
   file: string;
   entries: SkeletonEntry[];
   note?: string;
-  /** Tokens-saved baseline: this file read whole vs the signatures-only view. */
-  saved?: Savings;
 }
 
 /** Signatures-only view of one file, straight from the wiring graph — the
@@ -1463,7 +1432,6 @@ export function skeleton(dir: string, file: string, opts: { contextDir?: string 
       signature: n.signature,
       summary: n.summary?.split("\n")[0].trim() || undefined,
     })),
-    saved: savingsFor(graph, [defs[0].path]),
   };
 }
 
@@ -1477,12 +1445,7 @@ export function formatSkeleton(r: SkeletonResult): string {
     return `- ${e.span}  ${e.kind} ${e.name}${sig}${sum}`;
   });
   const body = `${head}\n${lines.join("\n")}`;
-  return withSavings(body, r.saved) + "\n";
-}
-
-/** Rough tokens for a byte length (≈ 4 chars/token; good enough for an estimate). */
-function toTokens(chars: number): number {
-  return Math.round(chars / 4);
+  return body + "\n";
 }
 
 /** Render an {@link AskResult} as a compact markdown context pack. */
@@ -1526,12 +1489,9 @@ export function formatAsk(r: AskResult): string {
     });
     lines.push(...scopeFooterLines(r));
   }
-  // Before `body` is joined, so the rules text is counted in the savings line
-  // below rather than claimed as free.
   if (r.rules?.length) lines.push(...formatRules(r.rules));
   const body = lines.join("\n").trimEnd();
-  const savings = askSavingsLine(r, body);
-  return (savings ? `${savings}\n\n${body}` : body) + escalationNudge(r) + "\n";
+  return body + escalationNudge(r) + "\n";
 }
 
 /** When a lexical `ask` returns thin/no results, the productive next move is a
@@ -1545,26 +1505,6 @@ function escalationNudge(r: AskResult): string {
   return (
     `\n\n[graft] ${n === 0 ? "no hits" : `only ${n} hit${n === 1 ? "" : "s"}`} — don't re-ask with new wording; switch tool: ` +
     "`graft grep \"<literal>\"` for every occurrence · `graft skeleton <file>` for a file's full API · `graft callers <symbol>` for who-uses."
-  );
-}
-
-/** The one-line token-saving estimate `ask` prepends in retriever mode, so the
- * agent gets the number for free in the tool output — no extra work on its end.
- * `packChars` is measured from the rendered body: exactly what the agent reads.
- * Header, not footer, for the reason documented on `withSavings`: a trailing
- * line dies to `head -N` and to host output truncation. */
-function askSavingsLine(r: AskResult, body: string): string {
-  if (!r.saved || r.saved.baselineChars <= 0) return "";
-  const pack = toTokens(body.length);
-  const base = toTokens(r.saved.baselineChars);
-  if (base <= pack) return ""; // no saving to claim (tiny files); stay quiet
-  const saved = base - pack;
-  const pct = Math.round((saved / base) * 100);
-  return (
-    `[graft] tokens saved ≈ ${saved.toLocaleString()} (${pct}%) — this pack ≈ ` +
-    `${pack.toLocaleString()} tok vs reading the ${r.saved.files} source file(s) whole ≈ ` +
-    `${base.toLocaleString()} tok. Estimate (baseline = those files read in full).` +
-    savingsTurnNudge(saved)
   );
 }
 

@@ -29,7 +29,6 @@ import { loadGraphCached } from "./load.js";
 import { buildRepoMap, formatRepoMap } from "./map.js";
 import { discoverWorkspaceChildren } from "./scopes.js";
 import {
-  callersSavings,
   headerOf,
   hitLine,
   looseNoteFor,
@@ -50,7 +49,6 @@ import {
 import { fuseScopes, STRONG_FLOOR, HIGH_FLOOR, type ScopedDoc } from "../ask/fuse.js";
 import { grepGraph, type GrepGroup, type GrepResult } from "../search/grep.js";
 import { formatGrepResult, zeroHitNote } from "../search/grep-cli.js";
-import { withSavings, type Savings } from "../context/savings.js";
 
 /** The parent index written to `<parent>/graft/workspace.json`. Nodes/edges
  * never live at the parent — they live in each child's own `graft/`. */
@@ -571,8 +569,6 @@ export function federateGrep(
   let filesSearched = 0;
   let totalHits = 0;
   const truncated = { files: 0, hits: 0 };
-  let savedFiles = 0;
-  let savedChars = 0;
 
   for (const { child, graph } of wg.loaded) {
     const r = grepGraph(graph, join(root, child), pattern, {
@@ -583,10 +579,6 @@ export function federateGrep(
     totalHits += r.totalHits;
     truncated.files += r.truncated.files;
     truncated.hits += r.truncated.hits;
-    if (r.saved) {
-      savedFiles += r.saved.files;
-      savedChars += r.saved.baselineChars;
-    }
     for (const g of r.groups) {
       groups.push({
         ...g,
@@ -597,8 +589,7 @@ export function federateGrep(
   }
 
   groups.sort((a, b) => b.inDegree - a.inDegree || a.path.localeCompare(b.path));
-  const saved: Savings | undefined = savedChars > 0 ? { files: savedFiles, baselineChars: savedChars } : undefined;
-  const result: GrepResult = { pattern, filesSearched, totalHits, groups, truncated, saved };
+  const result: GrepResult = { pattern, filesSearched, totalHits, groups, truncated };
   return { result, coverage: coverageNote(wg) };
 }
 
@@ -681,7 +672,7 @@ export function federateCallers(
       else for (const h of hits) lines.push(hitLine(direction, h, showDepth));
     }
     const body = lines.join("\n");
-    blocks.push(withSavings(body, callersSavings(graph, results)));
+    blocks.push(body);
   }
 
   const cov = coverageNote(wg);

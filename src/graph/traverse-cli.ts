@@ -14,7 +14,6 @@
 import { resolve } from "node:path";
 import { fileReader, referenceLine, wordRe } from "../blast/evidence.js";
 import { contextDirFor } from "../context/node-file.js";
-import { withSavings, savingsFor, type Savings } from "../context/savings.js";
 import { loadGraphCached } from "./load.js";
 import { resolveSymbol, edgeWalk, type Direction, type EdgeHit } from "./traverse.js";
 import type { GraphV1, NodeV1 } from "./types.js";
@@ -75,22 +74,6 @@ function quoteFor(
 ): Quote | undefined {
   if (!hit.node || hit.depth > 1) return undefined;
   return referenceLine(hit.node.path, hit.node.span, [wordRe(name)], read) ?? undefined;
-}
-
-/** Tokens-saved baseline for a callers/callees walk: the files of the matched
- * symbols plus every resolved edge endpoint, read whole — the files you'd open
- * to trace these edges by hand. Shared by the CLI and the MCP tool so both
- * surfaces report the same number. */
-export function callersSavings(
-  graph: GraphV1,
-  results: { symbol: NodeV1; hits: EdgeHit[] }[],
-): Savings | undefined {
-  const paths: string[] = [];
-  for (const { symbol, hits } of results) {
-    paths.push(symbol.path);
-    for (const h of hits) if (h.node) paths.push(h.node.path);
-  }
-  return savingsFor(graph, paths);
 }
 
 /** Loud, actionable empty-result note — never a bare empty list. `candidateCount`
@@ -210,7 +193,6 @@ export function runCallersCommand(query: string, dir: string, opts: CallersCliOp
   const showDepth = depth > 1;
 
   const results = matches.map((symbol) => ({ symbol, hits: edgeWalk(graph, symbol, direction, depth) }));
-  const saved = callersSavings(graph, results);
 
   if (opts.json) {
     const payload = {
@@ -222,7 +204,6 @@ export function runCallersCommand(query: string, dir: string, opts: CallersCliOp
         }
         return m;
       }),
-      saved,
     };
     console.log(JSON.stringify(payload, null, 2));
     return;
@@ -238,5 +219,5 @@ export function runCallersCommand(query: string, dir: string, opts: CallersCliOp
     lines.push("");
   }
   const body = lines.join("\n").replace(/\n+$/, "\n");
-  process.stdout.write(withSavings(body, saved));
+  process.stdout.write(body);
 }

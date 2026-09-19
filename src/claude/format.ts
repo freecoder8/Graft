@@ -5,7 +5,6 @@ import type { GraphV1, EdgeV1 } from '../graph/types.js';
 // "did we hit a real name, or match broadly enough to trust anyway" is the same
 // question in both places, and one set of calibrated numbers beats two.
 import { HIGH_FLOOR, STRONG_FLOOR } from '../ask/fuse.js';
-import { dollarsSaved, formatDollars } from '../context/price.js';
 
 const C = {
   indigo: (s: string) => `\x1b[38;2;84;111;255m${s}\x1b[0m`,
@@ -24,7 +23,6 @@ export function freshnessSegment(s: Stats): string {
 
 export function renderStatusline(
   stats: Stats | null,
-  session: SessionState | null,
   ctx: { ctxPct: number | null },
 ): string[] {
   if (!stats) {
@@ -32,15 +30,6 @@ export function renderStatusline(
   }
   const top = [C.muted('◤ ') + C.indigo('graft'), C.text(`${stats.nodeCount} nodes / ${stats.edgeCount} edges`)];
   top.push(freshnessSegment(stats));
-  const saved = session?.savedTokens ?? 0;
-  if (saved > 0) {
-    // Dollars only once a turn has actually been billed — see context/price.ts.
-    // Until then (turn one, or a host with no transcript) the token count
-    // stands alone rather than carrying a rate nobody measured.
-    const usd = dollarsSaved(saved, session?.inputCostMicros, session?.inputTokensBilled);
-    const money = usd === null ? '' : ` · ~${formatDollars(usd)}`;
-    top.push(C.indigo(`~${saved.toLocaleString()} tok saved${money}`));
-  }
 
   const bottom: string[] = [];
   if (typeof ctx.ctxPct === 'number') bottom.push(C.text(`ctx ${ctx.ctxPct}%`));
@@ -81,8 +70,6 @@ export function formatBlastRadius(w: GraphV1, filePath: string, cap = 8): string
 export interface AskJson {
   query: string; mode: string;
   hits: { kind: string; title: string; pointer: string; snippet: string; score: number; code?: string }[];
-  /** Set by `ask --source`: whole size of the files these hits cover (baseline). */
-  saved?: { files: number; baselineChars: number };
   /** Lexical mode: share (0..1) of the query's distinct terms the top hit matched. */
   coverage?: number;
   /** Lexical mode: the same share over the top hit's NAME field only — "did the
@@ -91,11 +78,9 @@ export interface AskJson {
   coverageStrong?: number;
 }
 
-function tokensOf(chars: number): number { return Math.round(chars / 4); }
-
 /** The retrieval pack body — pointers, snippets, and (in --source mode) the
  * actual code span for each hit, so the agent reads it here instead of opening
- * the file. Kept separate so the tokens-saved math can measure this exact text. */
+ * the file. */
 function retrievalBody(hits: AskJson['hits']): string {
   const blocks = hits.map((h, i) => {
     const ptr = (h.pointer ?? '').split(',')[0].trim();
@@ -115,28 +100,10 @@ function retrievalBody(hits: AskJson['hits']): string {
   return `${header}\n${blocks.join('\n')}`;
 }
 
-/** Tokens saved (baseline − this pack), or 0 when no honest estimate applies. */
-export function retrievalTokensSaved(ask: AskJson, cap = 5): number {
-  const hits = (ask.hits ?? []).slice(0, cap);
-  if (!hits.length || !ask.saved || ask.saved.baselineChars <= 0) return 0;
-  const pack = tokensOf(retrievalBody(hits).length);
-  const base = tokensOf(ask.saved.baselineChars);
-  return base > pack ? base - pack : 0;
-}
-
 export function formatRetrieval(ask: AskJson, cap = 5): string | null {
   const hits = (ask.hits ?? []).slice(0, cap);
   if (!hits.length) return null;
-  const body = retrievalBody(hits);
-  const saved = retrievalTokensSaved(ask, cap);
-  if (saved <= 0) return body;
-  const base = tokensOf(ask.saved!.baselineChars);
-  const pct = Math.round((saved / base) * 100);
-  return (
-    `${body}\n[graft] tokens saved ≈ ${saved.toLocaleString()} (${pct}%); this pack ≈ ` +
-    `${tokensOf(body.length).toLocaleString()} tok vs reading the ${ask.saved!.files} file(s) whole ≈ ` +
-    `${base.toLocaleString()} tok (estimate).`
-  );
+  return retrievalBody(hits);
 }
 
 /**
@@ -225,7 +192,7 @@ export function formatOrientation(indexMd: string, budgetBytes = 1500, staleNote
     `  In a monorepo, add --in <path>/ to ask/grep/callers to scope to one sub-project; hits are labeled [scope/].\n` +
     `  Already know the file or symbol to change? Go straight to it: graft grep "<symbol>", read the span, edit. Save ask for when you don't yet know where the code lives.\n` +
     `  Refactor, rename, or multi-file change? Run graft callers <sym> --depth all FIRST to map every connected file; editing the primary file and stopping is the classic miss (platform siblings, a new file to extract).\n` +
-    `Each tool opens its output with a "[graft] tokens saved ≈ N" line, sometimes with its dollar value; when you used graft this turn, close your reply with a one-line tally of the total saved, dollars included when given (e.g. 🌱 graft saved ~12k tokens (~$0.04) this turn, 3 calls). Never price tokens yourself; never pipe graft through head/tail — it is already capped, and clipping drops that line.\n`;
+    `Every tool's output is already capped and states what it dropped — never pipe a graft command through head/tail/sed -n, which would silently cost you hits.\n`;
   const banner = staleNote ? `${staleNote}\n\n` : "";
   return `${banner}${directive}\nrepo map (graft/INDEX.md):\n${indexMd.slice(0, budgetBytes)}`;
 }

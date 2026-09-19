@@ -70,8 +70,7 @@ export interface NodeV1 {
   // (signature-only; symbols + bare edges, no scope-aware binding).
   origin: "ast" | "generic";
   body_hash: string; // sha256 of the definition text; the Tier-2 re-run trigger
-  chars?: number; // byte length of the WHOLE file (file nodes only); the baseline
-  //                 `ask` uses to estimate tokens saved vs reading the file whole
+  chars?: number; // byte length of the WHOLE file (file nodes only)
   body_text?: string; // searchable whitespace-normalized definition body (Tier-1,
   //                 symbol nodes only, capped). Ranks `ask` queries so a term in
   //                 the code — not just the name/signature — is findable; never

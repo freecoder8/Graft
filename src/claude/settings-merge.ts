@@ -35,14 +35,12 @@ function graftBlocks(helpers?: string): Record<string, Json[]> {
   return {
     PostToolUse: [
       { matcher: 'Write|Edit|MultiEdit', hooks: [{ type: 'command', command: hookCmd('post-edit', helpers), timeout: 10000 }] },
-      // Score the usage mix and sum token savings. A graft retrieval (CLI `graft …`
-      // via Bash, or the `graft_*` MCP tools) prints a `[graft] tokens saved ≈ N`
-      // footer this hook sums into the session total; the same hook classifies
-      // Read/Grep/Glob as source reads vs graft as graft reads, which is what feeds
-      // `graft stats` and the `session_summary` graft-vs-grep ratio. Broad matcher,
-      // but the handler no-ops instantly unless there is something to record, so an
-      // unrelated Bash or a plain Read costs only a stdin read.
-      { matcher: 'Bash|mcp__graft__|Read|Grep|Glob', hooks: [{ type: 'command', command: hookCmd('tool-savings', helpers), timeout: 8000 }] },
+      // Score the usage mix: classify a graft retrieval (CLI `graft …` via Bash,
+      // or the `graft_*` MCP tools) against a source read (Read/Grep/Glob), which
+      // is what feeds `graft stats` and the `session_summary` graft-vs-grep ratio.
+      // Broad matcher, but the handler no-ops instantly unless there is something
+      // to record, so an unrelated Bash or a plain Read costs only a stdin read.
+      { matcher: 'Bash|mcp__graft__|Read|Grep|Glob', hooks: [{ type: 'command', command: hookCmd('tool-use', helpers), timeout: 8000 }] },
     ],
     // Longer budget than the other hooks: its `graft ask` is a real query, and a
     // query now brings the graph up to date first (graph/refresh.ts) — usually

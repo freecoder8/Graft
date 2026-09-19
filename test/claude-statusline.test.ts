@@ -55,7 +55,7 @@ test('empty wiring.json is a built graph: statusline shows 0 nodes, not "not bui
   const s = resolveStats(d)!;
   assert.equal(s.nodeCount, 0);
   assert.equal(s.edgeCount, 0);
-  const line = strip(renderStatusline(s, null, { ctxPct: null })[0]);
+  const line = strip(renderStatusline(s, { ctxPct: null })[0]);
   assert.doesNotMatch(line, /not built/);
   assert.doesNotMatch(line, /graft build/);
   assert.match(line, /0 nodes \/ 0 edges/);
@@ -65,7 +65,7 @@ test('a 0-node cache without wiring.json is still not built', () => {
   const d = repo();
   writeStats(d, { ...emptyStats(), nodeCount: 0, edgeCount: 0 });
   assert.equal(resolveStats(d), null, 'no artifact → missing, not an empty graph');
-  const line = strip(renderStatusline(null, null, { ctxPct: null })[0]);
+  const line = strip(renderStatusline(null, { ctxPct: null })[0]);
   assert.match(line, /not built/);
   assert.match(line, /graft build/);
 });

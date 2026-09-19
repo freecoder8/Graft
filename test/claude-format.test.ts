@@ -6,7 +6,7 @@ import { emptyStats } from '../src/claude/state.js';
 const strip = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
 
 test('not-built state', () => {
-  const lines = renderStatusline(null, null, { ctxPct: null });
+  const lines = renderStatusline(null, { ctxPct: null });
   assert.match(strip(lines[0]), /not built/);
   assert.match(strip(lines[0]), /graft build/);
 });
@@ -15,7 +15,7 @@ test('empty graph (0 nodes) is built, not "not built"', () => {
   // A successful `graft build` on a docs-only repo writes a real graph with
   // zero symbols. nodeCount === 0 must not be treated as "never built".
   const stats = { ...emptyStats(), nodeCount: 0, edgeCount: 0 };
-  const line = strip(renderStatusline(stats, null, { ctxPct: null })[0]);
+  const line = strip(renderStatusline(stats, { ctxPct: null })[0]);
   assert.doesNotMatch(line, /not built/);
   assert.doesNotMatch(line, /graft build/);
   assert.match(line, /0 nodes \/ 0 edges/);
@@ -25,7 +25,7 @@ test('empty graph (0 nodes) is built, not "not built"', () => {
 test('two-line bar: size + freshness + ctx + last', () => {
   const stats = { ...emptyStats(), nodeCount: 319, edgeCount: 730, totalCount: 319, readyCount: 0,
     dirty: true, staleCount: 4, lastFile: 'pkce.ts' };
-  const lines = renderStatusline(stats, null, { ctxPct: 34 }).map(strip);
+  const lines = renderStatusline(stats, { ctxPct: 34 }).map(strip);
   assert.match(lines[0], /graft/);
   assert.match(lines[0], /319 nodes \/ 730 edges/);
   assert.doesNotMatch(lines[0], /enriched/); // enriched segment removed from the bar
@@ -36,8 +36,8 @@ test('two-line bar: size + freshness + ctx + last', () => {
 
 test('syncing overrides stale; synced when clean', () => {
   const base = { ...emptyStats(), nodeCount: 1, edgeCount: 0, totalCount: 1 };
-  assert.match(strip(renderStatusline({ ...base, syncing: true, dirty: true }, null, { ctxPct: null })[0]), /syncing/);
-  assert.match(strip(renderStatusline(base, null, { ctxPct: null })[0]), /✓ synced/);
+  assert.match(strip(renderStatusline({ ...base, syncing: true, dirty: true }, { ctxPct: null })[0]), /syncing/);
+  assert.match(strip(renderStatusline(base, { ctxPct: null })[0]), /✓ synced/);
 });
 
 const wiring2 = {
@@ -84,14 +84,6 @@ test('formatRetrieval keeps the substitutive header when code is inlined', () =>
   assert.match(strip(formatRetrieval(ask)!), /retrieved context, read these spans/);
 });
 
-test('formatRetrieval appends a tokens-saved line when ask reports a baseline', () => {
-  const ask = { query: 'pkce', mode: 'lexical', saved: { files: 1, baselineChars: 8000 }, hits: [
-    { kind: 'symbol', title: 'verify', pointer: 'src/pkce.ts:L1-L4', snippet: 's', score: 1, code: 'a\nb' },
-  ] } as any;
-  const txt = strip(formatRetrieval(ask)!);
-  assert.match(txt, /tokens saved ≈ [\d,]+ \(\d+%\)/);
-});
-
 test('formatRetrieval returns null for no hits', () => {
   assert.equal(formatRetrieval({ query: 'x', mode: 'empty', hits: [] } as any), null);
 });
@@ -105,7 +97,7 @@ const gateAsk = (over: Record<string, unknown> = {}) => ({
   ],
   ...over,
 }) as any;
-const freshSession = () => ({ lastQuery: null, perAgentQuery: {}, graftReads: 0, sourceReads: 0, savedTokens: 0, injectedPointers: [] as string[] });
+const freshSession = () => ({ lastQuery: null, perAgentQuery: {}, graftReads: 0, sourceReads: 0, injectedPointers: [] as string[] });
 
 test('relevantRetrieval injects on good coverage and records pointers', () => {
   const s = freshSession();
@@ -212,19 +204,4 @@ test('renderSubagent without a query still shows the agent', () => {
   assert.match(out, /Plan/);
 });
 
-test('renderStatusline carries the dollar value once the session has been billed', () => {
-  const stats = { ...emptyStats(), nodeCount: 1, edgeCount: 0, totalCount: 1 };
-  const s = { ...freshSession(), savedTokens: 100_000, inputCostMicros: 600_000, inputTokensBilled: 1_000_000 };
-  const line = strip(renderStatusline(stats, s as any, { ctxPct: null })[0]);
-  assert.match(line, /~100,000 tok saved · ~\$0\.06/);
-});
 
-test('renderStatusline shows tokens alone until a turn has been billed', () => {
-  // Turn one of every session, and every turn on a host that exposes no
-  // transcript. Tokens are still true; a price nobody measured is not.
-  const stats = { ...emptyStats(), nodeCount: 1, edgeCount: 0, totalCount: 1 };
-  const s = { ...freshSession(), savedTokens: 100_000 };
-  const line = strip(renderStatusline(stats, s as any, { ctxPct: null })[0]);
-  assert.match(line, /~100,000 tok saved/);
-  assert.doesNotMatch(line, /\$/);
-});
