@@ -98,8 +98,22 @@ export class AnthropicChatModel implements ChatModel {
       params.tools = tools;
     }
 
-    const resp = await this.client.messages.create(params);
+    const resp = await this.createMessage(params);
     return this.fromResponse(resp, fmt.kind);
+  }
+
+  /**
+   * Retry once with thinking disabled when the endpoint refuses a forced
+   * `tool_choice` in thinking mode (DeepSeek: "Thinking mode does not support this
+   * tool_choice") — the same remedy the OpenAI adapter applies as `reasoning_effort`.
+   */
+  private async createMessage(params: Anthropic.MessageCreateParamsNonStreaming): Promise<Anthropic.Message> {
+    try {
+      return await this.client.messages.create(params);
+    } catch (err) {
+      if (!params.tool_choice || !isRejectedToolChoiceWithThinking(err)) throw err;
+      return this.client.messages.create({ ...params, thinking: { type: "disabled" } });
+    }
   }
 
   /** Reconstruct an assistant turn, replaying the original blocks when we made them. */
@@ -145,6 +159,15 @@ export class AnthropicChatModel implements ChatModel {
 
 function toAnthropicTool(t: ToolSpec): Anthropic.Tool {
   return { name: t.name, description: t.description, input_schema: t.parameters as Anthropic.Tool.InputSchema };
+}
+
+/** The 400 a thinking-by-default model returns for any forced `tool_choice`. */
+function isRejectedToolChoiceWithThinking(err: unknown): boolean {
+  return (
+    err instanceof Anthropic.APIError &&
+    err.status === 400 &&
+    /thinking mode does not support this tool_choice/i.test(err.message)
+  );
 }
 
 /** Anthropic reports uncached input in `input_tokens` and cache tokens separately. */

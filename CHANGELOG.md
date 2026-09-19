@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Thinking-mode endpoints negotiate the forced `tool_choice` 400**: an
+  Anthropic-compatible endpoint whose model runs in thinking mode by default
+  (DeepSeek's, with "Thinking mode does not support this tool_choice") now gets
+  one retry with thinking disabled, mirroring the OpenAI adapter's
+  `reasoning_effort: "none"` fallback — so the caller's chosen tool survives
+  instead of the build dying on the first batch.
+
 ## 0.18.0
 
 ### Added

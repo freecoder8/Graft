@@ -7,7 +7,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import OpenAI from "openai";
-import type Anthropic from "@anthropic-ai/sdk";
+import Anthropic from "@anthropic-ai/sdk";
 import { OpenAIChatModel } from "../src/ai/llm/openai.js";
 import { AnthropicChatModel } from "../src/ai/llm/anthropic.js";
 import type { ChatRequest } from "../src/ai/llm/types.js";
@@ -277,4 +277,49 @@ test("anthropic: json mode forces emit_json and returns serialized text", async 
   assert.deepEqual(box.params.tool_choice, { type: "tool", name: "emit_json" });
   assert.equal(res.text, '{"correct":true}');
   assert.equal(res.toolCalls.length, 0);
+});
+
+const THINKING_TOOL_CHOICE = "Thinking mode does not support this tool_choice";
+
+/** Stub client whose first call is refused the way a thinking-by-default endpoint refuses it. */
+function refusingAnthropic(resp: unknown) {
+  const calls: Anthropic.MessageCreateParamsNonStreaming[] = [];
+  const client = {
+    messages: {
+      create: async (params: Anthropic.MessageCreateParamsNonStreaming) => {
+        calls.push(params);
+        if (calls.length === 1) {
+          throw new Anthropic.APIError(400, { message: THINKING_TOOL_CHOICE }, THINKING_TOOL_CHOICE, new Headers());
+        }
+        return resp;
+      },
+    },
+  } as unknown as Anthropic; // stub SDK client, same seam as fakeAnthropic above
+  return { client, calls };
+}
+
+test("anthropic: retries with thinking disabled when the model refuses a forced tool_choice", async () => {
+  const resp = anthropicResp({
+    content: [{ type: "tool_use", id: "s1", name: "record_symbols", input: { symbols: [] } }],
+    stop_reason: "tool_use",
+  });
+  const { client, calls } = refusingAnthropic(resp);
+  const m = new AnthropicChatModel({ apiKey: "x", model: "deepseek-flash", client });
+  const res = await m.create({
+    messages: [{ role: "user", content: "describe" }],
+    tools: [{ name: "record_symbols", description: "d", parameters: { type: "object" } }],
+    responseFormat: { kind: "tool", name: "record_symbols" },
+  });
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].thinking, undefined);
+  assert.deepEqual(calls[1].thinking, { type: "disabled" });
+  assert.deepEqual(calls[1].tool_choice, { type: "tool", name: "record_symbols" }); // the caller's tool survived
+  assert.equal(res.toolCalls.length, 1);
+});
+
+test("anthropic: does NOT disable thinking for a request that forces no tool", async () => {
+  const { client, calls } = refusingAnthropic(anthropicResp());
+  const m = new AnthropicChatModel({ apiKey: "x", model: "deepseek-flash", client });
+  await assert.rejects(() => m.create({ messages: [{ role: "user", content: "hi" }] }));
+  assert.equal(calls.length, 1); // no rewrite of a request the caller did not force
 });
