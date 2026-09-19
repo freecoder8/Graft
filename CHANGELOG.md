@@ -19,6 +19,10 @@
 - **An Anthropic call with an escalated output budget is streamed** instead of
   failing on the SDK's non-streaming guard, which refuses any request whose
   implied duration exceeds ten minutes.
+- **A structured reply that comes back unusable is re-asked** — cut off
+  mid-JSON, tool arguments that never parsed, or nothing at all — instead of
+  being read as "the model found nothing", which is how a whole synthesis batch
+  dropped to `0 nodes` and left files `pending` in the meaning pass.
 
 ## 0.18.0
 

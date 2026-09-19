@@ -261,6 +261,11 @@ export async function buildContext(dir: string, opts: BuildOptions): Promise<Bui
     console.error(
       `  synthesis batch ${b + 1}/${batches.length}: ${nodes.length} nodes, ${links} links${cached ? " (cached)" : ""}`,
     );
+    // A batch is not a hit until it produced something, so say so out loud instead
+    // of letting a whole slice of the repo drop out of the graph silently.
+    if (!cached && nodes.length === 0) {
+      result.errors.push(`synthesis batch ${b + 1}: the model returned no nodes`);
+    }
     synthNodes.push(...nodes);
   }
   // Drop cache entries for batches we no longer produce, so it can't grow forever.

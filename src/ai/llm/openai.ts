@@ -233,7 +233,10 @@ export class OpenAIChatModel implements ChatModel {
       try {
         return JSON.parse(s || "{}");
       } catch {
-        return {};
+        // Cut off mid-JSON or not JSON at all. Leave `args` undefined rather than
+        // fabricating `{}`: callers must be able to tell "no payload" from
+        // "payload that says nothing", so the reply can be re-asked.
+        return undefined;
       }
     };
 
@@ -247,7 +250,7 @@ export class OpenAIChatModel implements ChatModel {
     if (format === "json") {
       // Surface the synthetic tool's object as JSON text; hide it from `toolCalls`.
       const jsonCall = toolCalls.find((c) => c.name === JSON_TOOL);
-      if (jsonCall) text = JSON.stringify(jsonCall.args);
+      if (jsonCall?.args !== undefined) text = JSON.stringify(jsonCall.args);
       toolCalls = toolCalls.filter((c) => c.name !== JSON_TOOL);
     }
 

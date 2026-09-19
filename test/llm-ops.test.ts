@@ -180,35 +180,53 @@ async function withCapturedError<T>(fn: () => Promise<T>): Promise<{ result: T; 
   }
 }
 
-/** Replays a canned payload; `truncateFirst` cuts the first reply off at the output cap. */
+/** Replays a canned payload; the first reply can be cut off, unparseable, or empty. */
 class BudgetFakeModel implements ChatModel {
   readonly label = "fake:budget";
   readonly budgets: number[] = [];
   constructor(
     private readonly payload: { toolCalls?: ToolCall[] },
-    private readonly truncateFirst = false,
+    private readonly firstReply: "ok" | "cut-off" | "unparsed" | "empty" = "ok",
   ) {}
 
   async create(req: ChatRequest): Promise<ChatResponse> {
     this.budgets.push(req.maxTokens ?? 0);
-    const cut = this.truncateFirst && this.budgets.length === 1;
+    const broken = this.budgets.length === 1 && this.firstReply !== "ok";
+    const calls = !broken
+      ? (this.payload.toolCalls ?? [])
+      : this.firstReply === "empty"
+        ? []
+        : [{ id: "1", name: "record_graph", args: this.firstReply === "cut-off" ? {} : undefined }];
     return {
       text: "",
-      // A reply cut off mid-JSON carries at most a partial object — never the nodes.
-      toolCalls: cut ? [{ id: "1", name: "record_graph", args: {} }] : (this.payload.toolCalls ?? []),
+      toolCalls: calls,
       usage: { input: 0, output: 0, cacheRead: 0, cacheCreate: 0 },
-      stopReason: cut ? "length" : "stop",
+      stopReason: broken && this.firstReply === "cut-off" ? "length" : "stop",
       assistant: { role: "assistant", content: "" },
     };
   }
 }
 
 test("a reply cut off at the output cap is re-asked with a larger budget", async () => {
-  const m = new BudgetFakeModel({ toolCalls: [{ id: "1", name: "record_graph", args: AUTH_PAYLOAD }] }, true);
+  const m = new BudgetFakeModel({ toolCalls: [{ id: "1", name: "record_graph", args: AUTH_PAYLOAD }] }, "cut-off");
   const nodes = await new ChatSynthesizer(m).synthesize([{ path: "a.ts", summary: "x" }]);
   assert.equal(m.budgets.length, 2, "a cut-off reply must be re-asked, exactly once");
   assert.ok(m.budgets[1] > m.budgets[0], `the retry must raise max_tokens, got ${m.budgets.join(" -> ")}`);
   assert.equal(nodes.length, 1, "the caller gets the complete reply, not the truncated one");
+});
+
+test("a reply whose tool arguments never parsed is re-asked", async () => {
+  const m = new BudgetFakeModel({ toolCalls: [{ id: "1", name: "record_graph", args: AUTH_PAYLOAD }] }, "unparsed");
+  const nodes = await new ChatSynthesizer(m).synthesize([{ path: "a.ts", summary: "x" }]);
+  assert.equal(m.budgets.length, 2, "an unusable payload must be re-asked, not read as 'no nodes'");
+  assert.equal(nodes.length, 1);
+});
+
+test("an empty reply is re-asked", async () => {
+  const m = new BudgetFakeModel({ toolCalls: [{ id: "1", name: "record_graph", args: AUTH_PAYLOAD }] }, "empty");
+  const nodes = await new ChatSynthesizer(m).synthesize([{ path: "a.ts", summary: "x" }]);
+  assert.equal(m.budgets.length, 2, "a reply with no tool call and no text must be re-asked");
+  assert.equal(nodes.length, 1);
 });
 
 test("a complete reply is asked once", async () => {

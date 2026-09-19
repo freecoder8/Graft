@@ -23,7 +23,11 @@
 export interface ToolCall {
   id: string;
   name: string;
-  /** Parsed argument object. Adapters (de)serialize to their wire format. */
+  /**
+   * Parsed argument object. Adapters (de)serialize to their wire format.
+   * `undefined` when the provider's argument string did not parse — the reply is
+   * unusable and worth re-asking, never "the model sent an empty payload".
+   */
   args: unknown;
 }
 
@@ -124,16 +128,25 @@ export function isTruncatedStop(reason: string | null | undefined): boolean {
 
 /**
  * Run a forced-structured call, retrying once with a larger output budget when
- * the reply was cut off mid-JSON: a truncated tool payload parses as `{}` and
- * reads downstream as "the model found nothing".
+ * the reply came back unusable — cut off mid-JSON, tool arguments that never
+ * parsed (the adapters leave those `undefined`), or nothing at all. Every one of
+ * those reads downstream as "the model found nothing", which is how a whole
+ * synthesis batch turns into a silent `0 nodes` and leaves symbols `pending`.
  */
 export async function createStructured(
   model: ChatModel,
   req: Omit<ChatRequest, "maxTokens">,
 ): Promise<ChatResponse> {
   const first = await model.create({ ...req, maxTokens: STRUCTURED_MAX_TOKENS });
-  if (!isTruncatedStop(first.stopReason)) return first;
+  if (!isUnusableStructuredReply(first)) return first;
   return model.create({ ...req, maxTokens: STRUCTURED_MAX_TOKENS_ESCALATED });
+}
+
+/** True when a structured reply carries nothing the caller could use. */
+export function isUnusableStructuredReply(res: ChatResponse): boolean {
+  if (isTruncatedStop(res.stopReason)) return true;
+  if (res.toolCalls.some((c) => c.args === undefined)) return true;
+  return res.toolCalls.length === 0 && !res.text.trim();
 }
 
 /**

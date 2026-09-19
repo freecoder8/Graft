@@ -116,6 +116,50 @@ test("openai: assistant providerRaw replays verbatim", async () => {
   assert.deepEqual(box.params.messages[1], raw);
 });
 
+test("openai: unparseable tool arguments stay undefined instead of becoming {}", async () => {
+  const { client } = fakeOpenAI(
+    openAiResp({
+      choices: [
+        {
+          message: {
+            content: "",
+            tool_calls: [
+              { id: "1", type: "function", function: { name: "record_graph", arguments: '{"nodes":[{"name":' } },
+            ],
+          },
+          finish_reason: "tool_calls",
+        },
+      ],
+    }),
+  );
+  const m = new OpenAIChatModel({ apiKey: "x", model: "gpt-x", client });
+  const res = await m.create({
+    messages: [{ role: "user", content: "q" }],
+    responseFormat: { kind: "tool", name: "record_graph" },
+  });
+  assert.equal(res.toolCalls[0].args, undefined);
+});
+
+test("openai: json mode keeps the model's text when the synthetic call's args did not parse", async () => {
+  const { client } = fakeOpenAI(
+    openAiResp({
+      choices: [
+        {
+          message: {
+            content: "not JSON, sorry",
+            tool_calls: [{ id: "j1", type: "function", function: { name: "emit_json", arguments: '{"correct":' } }],
+          },
+          finish_reason: "tool_calls",
+        },
+      ],
+    }),
+  );
+  const m = new OpenAIChatModel({ apiKey: "x", model: "gpt-x", client });
+  const res = await m.create({ messages: [{ role: "user", content: "grade" }], responseFormat: { kind: "json" } });
+  assert.equal(res.text, "not JSON, sorry");
+  assert.equal(res.toolCalls.length, 0);
+});
+
 test("openai: retries with tool_choice \"required\" when the server rejects the object form (single tool)", async () => {
   const calls: any[] = [];
   const resp = openAiResp({
