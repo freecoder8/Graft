@@ -108,11 +108,31 @@ export class AnthropicChatModel implements ChatModel {
    * tool_choice") — the same remedy the OpenAI adapter applies as `reasoning_effort`.
    */
   private async createMessage(params: Anthropic.MessageCreateParamsNonStreaming): Promise<Anthropic.Message> {
+    // Bounded: the base request, then at most one retry with thinking disabled.
+    let current = params;
+    let retried = false;
+    for (;;) {
+      try {
+        return await this.sendMessage(current);
+      } catch (err) {
+        if (retried || !current.tool_choice || current.thinking || !isRejectedToolChoiceWithThinking(err)) throw err;
+        retried = true;
+        current = { ...current, thinking: { type: "disabled" } };
+      }
+    }
+  }
+
+  /**
+   * One attempt. The SDK refuses a non-streaming request whose output budget
+   * implies more than its 10-minute cap, so an escalated budget streams instead —
+   * note that guard fires client-side, before the endpoint can reject the request.
+   */
+  private async sendMessage(params: Anthropic.MessageCreateParamsNonStreaming): Promise<Anthropic.Message> {
     try {
       return await this.client.messages.create(params);
     } catch (err) {
-      if (!params.tool_choice || !isRejectedToolChoiceWithThinking(err)) throw err;
-      return this.client.messages.create({ ...params, thinking: { type: "disabled" } });
+      if (isStreamingRequired(err)) return this.client.messages.stream(params).finalMessage();
+      throw err;
     }
   }
 
@@ -168,6 +188,15 @@ function isRejectedToolChoiceWithThinking(err: unknown): boolean {
     err.status === 400 &&
     /thinking mode does not support this tool_choice/i.test(err.message)
   );
+}
+
+/**
+ * The SDK refuses a non-streaming request whose `max_tokens` implies more than its
+ * 10-minute cap (roughly 21k tokens) — the escalated structured-output budget lands
+ * there, so that request has to stream.
+ */
+function isStreamingRequired(err: unknown): boolean {
+  return err instanceof Anthropic.AnthropicError && /streaming is required/i.test(err.message);
 }
 
 /** Anthropic reports uncached input in `input_tokens` and cache tokens separately. */

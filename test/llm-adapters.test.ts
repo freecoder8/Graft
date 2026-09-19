@@ -323,3 +323,71 @@ test("anthropic: does NOT disable thinking for a request that forces no tool", a
   await assert.rejects(() => m.create({ messages: [{ role: "user", content: "hi" }] }));
   assert.equal(calls.length, 1); // no rewrite of a request the caller did not force
 });
+
+test("anthropic: the thinking retry happens before streaming a big budget", async () => {
+  const resp = anthropicResp({
+    content: [{ type: "tool_use", id: "s1", name: "record_symbols", input: { symbols: [] } }],
+    stop_reason: "tool_use",
+  });
+  const calls: string[] = [];
+  const streamed: Anthropic.MessageCreateParamsNonStreaming[] = [];
+  const client = {
+    messages: {
+      create: async () => {
+        calls.push("create");
+        if (calls.length === 1) {
+          throw new Anthropic.APIError(400, { message: THINKING_TOOL_CHOICE }, THINKING_TOOL_CHOICE, new Headers());
+        }
+        throw new Anthropic.AnthropicError("Streaming is required for operations that may take longer than 10 minutes.");
+      },
+      stream: (params: Anthropic.MessageCreateParamsNonStreaming) => {
+        calls.push("stream");
+        streamed.push(params);
+        return { finalMessage: async () => resp };
+      },
+    },
+  } as unknown as Anthropic; // stub SDK client, same seam as fakeAnthropic above
+  const m = new AnthropicChatModel({ apiKey: "x", model: "deepseek-flash", client });
+  const res = await m.create({
+    messages: [{ role: "user", content: "describe" }],
+    maxTokens: 32768,
+    tools: [{ name: "record_symbols", description: "d", parameters: { type: "object" } }],
+    responseFormat: { kind: "tool", name: "record_symbols" },
+  });
+  assert.deepEqual(calls, ["create", "create", "stream"]); // never stream the thinking-mode refusal
+  assert.deepEqual(streamed[0].thinking, { type: "disabled" });
+  assert.deepEqual(streamed[0].tool_choice, { type: "tool", name: "record_symbols" });
+  assert.equal(res.toolCalls.length, 1);
+});
+
+test("anthropic: a budget above the SDK's non-streaming cap is streamed", async () => {
+  const resp = anthropicResp({
+    content: [{ type: "tool_use", id: "s1", name: "record_symbols", input: { symbols: [] } }],
+    stop_reason: "tool_use",
+  });
+  const calls = { create: 0, stream: 0 };
+  const client = {
+    messages: {
+      create: async () => {
+        calls.create++;
+        // Verbatim shape of the SDK's refusal (see its _calculateNonstreamingTimeout).
+        throw new Anthropic.AnthropicError(
+          "Streaming is required for operations that may take longer than 10 minutes. See https://github.com/anthropics/anthropic-sdk-typescript#long-requests for more details",
+        );
+      },
+      stream: () => {
+        calls.stream++;
+        return { finalMessage: async () => resp };
+      },
+    },
+  } as unknown as Anthropic;
+  const m = new AnthropicChatModel({ apiKey: "x", model: "deepseek-flash", client });
+  const res = await m.create({
+    messages: [{ role: "user", content: "describe" }],
+    maxTokens: 32768,
+    tools: [{ name: "record_symbols", description: "d", parameters: { type: "object" } }],
+    responseFormat: { kind: "tool", name: "record_symbols" },
+  });
+  assert.deepEqual(calls, { create: 1, stream: 1 });
+  assert.equal(res.toolCalls.length, 1);
+});

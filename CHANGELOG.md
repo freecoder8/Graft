@@ -16,6 +16,9 @@
 - **Crux replies that echo the target line as the id** (`<id> | <kind> | lines
   L…`) are mapped back onto the id that was asked for, so a whole file's meaning
   is no longer discarded as "the model returned nothing".
+- **An Anthropic call with an escalated output budget is streamed** instead of
+  failing on the SDK's non-streaming guard, which refuses any request whose
+  implied duration exceeds ten minutes.
 
 ## 0.18.0
 
