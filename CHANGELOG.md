@@ -10,6 +10,9 @@
   one retry with thinking disabled, mirroring the OpenAI adapter's
   `reasoning_effort: "none"` fallback — so the caller's chosen tool survives
   instead of the build dying on the first batch.
+- **Structured calls that hit the output cap retry with a larger budget** rather
+  than returning a silently empty result: a truncated synthesis batch used to be
+  read as `0 nodes, 0 links` and left every symbol `pending`.
 
 ## 0.18.0
 

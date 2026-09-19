@@ -112,6 +112,30 @@ export interface ChatModel {
   create(req: ChatRequest): Promise<ChatResponse>;
 }
 
+/** Output budget for a forced-structured call, and the escalation used on truncation. */
+export const STRUCTURED_MAX_TOKENS = 8192;
+const STRUCTURED_MAX_TOKENS_ESCALATED = 32768;
+
+/** True when the provider stopped because the output budget ran out, not because it finished. */
+export function isTruncatedStop(reason: string | null | undefined): boolean {
+  const r = (reason ?? "").toLowerCase();
+  return r === "length" || r === "max_tokens";
+}
+
+/**
+ * Run a forced-structured call, retrying once with a larger output budget when
+ * the reply was cut off mid-JSON: a truncated tool payload parses as `{}` and
+ * reads downstream as "the model found nothing".
+ */
+export async function createStructured(
+  model: ChatModel,
+  req: Omit<ChatRequest, "maxTokens">,
+): Promise<ChatResponse> {
+  const first = await model.create({ ...req, maxTokens: STRUCTURED_MAX_TOKENS });
+  if (!isTruncatedStop(first.stopReason)) return first;
+  return model.create({ ...req, maxTokens: STRUCTURED_MAX_TOKENS_ESCALATED });
+}
+
 /**
  * How many times the transport retries a failed request before the error reaches
  * the caller. Both SDKs retry only what is worth retrying (429 and 5xx, honouring

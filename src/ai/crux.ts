@@ -15,6 +15,7 @@
  * consumed once, at write time, to slice the crux text verbatim from source.
  */
 import type { ChatModel, ChatResponse } from "./llm/types.js";
+import { createStructured, isTruncatedStop } from "./llm/types.js";
 import { recoverToolArgsFromContent, warnToolChoiceIgnored } from "./llm/recover-tool.js";
 import type { Kind } from "../graph/types.js";
 
@@ -52,12 +53,6 @@ export type CruxMissKind = "empty-toolCalls" | "unparseable" | "truncated" | "em
 export interface CruxMiss {
   kind: CruxMissKind;
   finishReason: string | null;
-}
-
-function isTruncatedStop(reason: string | null): boolean {
-  if (!reason) return false;
-  const r = reason.toLowerCase();
-  return r === "length" || r === "max_tokens";
 }
 
 /** Classify an empty/unusable crux reply. `null` means at least one usable summary. */
@@ -180,9 +175,8 @@ export class ChatCruxSummarizer implements CruxSummarizer {
   async describeFile(input: FileCruxInput): Promise<NodeCrux[]> {
     this.lastMiss = null;
     if (input.nodes.length === 0) return [];
-    const res = await this.model.create({
+    const res = await createStructured(this.model, {
       temperature: 0,
-      maxTokens: 8192,
       tools: [
         {
           name: RECORD_TOOL,

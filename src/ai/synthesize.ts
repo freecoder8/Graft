@@ -7,6 +7,7 @@
  * grounded in, so provenance (and staleness) stays exact.
  */
 import type { ChatModel } from "./llm/types.js";
+import { createStructured } from "./llm/types.js";
 import { recoverToolArgsFromContent, warnToolChoiceIgnored } from "./llm/recover-tool.js";
 
 /** A directed edge to another node, by node name (resolved to a slug later). */
@@ -131,9 +132,8 @@ export class ChatSynthesizer implements Synthesizer {
 
   async synthesize(files: FileSummary[]): Promise<SynthNode[]> {
     if (files.length === 0) return [];
-    const res = await this.model.create({
+    const res = await createStructured(this.model, {
       temperature: 0,
-      maxTokens: 8192,
       tools: [
         {
           name: RECORD_TOOL,
