@@ -190,7 +190,13 @@ export class ChatCruxSummarizer implements CruxSummarizer {
         { role: "user", content: userContent(input) },
       ],
     });
-    const parsed = parseResults(argsFromResponse(res));
+    const parsed = parseResults(argsFromResponse(res)).map((r) => {
+      if (input.nodes.some((n) => n.id === r.id)) return r;
+      // A model that echoes the whole `- id=<id> | <kind> | lines L…` target line
+      // as the id misses the downstream id lookup; map it back to the target it starts with.
+      const hit = input.nodes.find((n) => r.id.startsWith(`${n.id} |`) || r.id.startsWith(`${n.id}|`));
+      return hit ? { ...r, id: hit.id } : r;
+    });
     this.lastMiss = classifyCruxMiss(res, parsed);
     return parsed;
   }

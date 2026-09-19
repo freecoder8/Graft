@@ -13,6 +13,9 @@
 - **Structured calls that hit the output cap retry with a larger budget** rather
   than returning a silently empty result: a truncated synthesis batch used to be
   read as `0 nodes, 0 links` and left every symbol `pending`.
+- **Crux replies that echo the target line as the id** (`<id> | <kind> | lines
+  L…`) are mapped back onto the id that was asked for, so a whole file's meaning
+  is no longer discarded as "the model returned nothing".
 
 ## 0.18.0
 

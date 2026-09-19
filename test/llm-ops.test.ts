@@ -217,3 +217,35 @@ test("a complete reply is asked once", async () => {
   assert.equal(m.budgets.length, 1);
   assert.equal(nodes.length, 1);
 });
+
+test("crux: an echoed target line is mapped back to the node id", async () => {
+  // The target list renders each id as `- id=<id> | <kind> | lines L…`; a model may copy the line.
+  const m = new FakeChatModel({
+    toolCalls: [
+      {
+        id: "1",
+        name: "record_symbols",
+        args: {
+          symbols: [
+            { id: "a.ts | file | lines L1-L5", summary: "the module", crux_start: 0, crux_end: 0 },
+            { id: "a.ts#sym1 | function | lines L2-L3 | sym1()", summary: "does x", crux_start: 2, crux_end: 3 },
+          ],
+        },
+      },
+    ],
+  });
+  const out = await new ChatCruxSummarizer(m).describeFile({
+    path: "a.ts",
+    source: "l1\nl2\nl3\nl4\nl5\n",
+    nodes: [
+      { id: "a.ts", kind: "file", signature: null, startLine: 1, endLine: 5 },
+      { id: "a.ts#sym1", kind: "function", signature: "sym1()", startLine: 2, endLine: 3 },
+    ],
+  });
+  assert.deepEqual(
+    out.map((r) => r.id),
+    ["a.ts", "a.ts#sym1"],
+    "the enrichment pass looks these up by the requested id, so an echoed line must not survive",
+  );
+  assert.equal(out[1].summary, "does x");
+});
