@@ -85,6 +85,15 @@ export function isContainerWarm(langName: string): boolean {
   return loaded.has(langName);
 }
 
+/** Drop every warmed container grammar. `loaded` holds `Language` handles minted by
+ *  the web-tree-sitter runtime instance in generic.ts, so when that runtime is torn
+ *  down and replaced (an aborted module cannot be revived) these handles are stale
+ *  pointers into a dead heap. Clearing makes a re-warm actually reload:
+ *  `warmContainerGrammars` skips names it thinks it already has. */
+export function resetContainerGrammars(): void {
+  loaded.clear();
+}
+
 /** `L12-L20` shifted by n lines. The span format is produced in exactly two
  * places (extract.ts and generic.ts) and is always this shape; anything else is
  * returned untouched rather than guessed at. */
@@ -154,51 +163,58 @@ export function extractContainer(rel: string, source: string, lang: ContainerLan
   const residuals: string[] = [];
 
   const language = loaded.get(lang.name);
-  const root = language ? parseWasm(language, source) : null;
+  const tree = language ? parseWasm(language, source) : null;
+  const root = tree?.rootNode ?? null;
 
-  if (root) {
-    // Ids are minted per file by the inner extractor, so two script blocks that
-    // both define `setup` would collide. Threading one set across the blocks
-    // makes the second one `path#setup~2`, and the rename is applied to that
-    // block's edges too so nothing points at an id that no longer exists.
-    const minted = new Set<string>([rel]);
+  try {
+    if (root) {
+      // Ids are minted per file by the inner extractor, so two script blocks that
+      // both define `setup` would collide. Threading one set across the blocks
+      // makes the second one `path#setup~2`, and the rename is applied to that
+      // block's edges too so nothing points at an id that no longer exists.
+      const minted = new Set<string>([rel]);
 
-    for (const body of blocks(root, lang)) {
-      const script = source.slice(body.startIndex, body.endIndex);
+      for (const body of blocks(root, lang)) {
+        const script = source.slice(body.startIndex, body.endIndex);
 
-      let inner: ExtractResult;
-      try {
-        inner = extractFile(rel, script, lang.inner);
-      } catch {
-        continue; // one bad block, not a bad build
-      }
+        let inner: ExtractResult;
+        try {
+          inner = extractFile(rel, script, lang.inner);
+        } catch {
+          continue; // one bad block, not a bad build
+        }
 
-      // `raw_text` starts immediately after the `>` of the opening tag, so its
-      // row IS the tag's row and the slice begins with that line's newline.
-      // Script line 1 is therefore the tail of the tag line, and script line N
-      // lands on `.vue` line row + N — which is exactly "add the start row to a
-      // 1-based span". Taking the row from the tag node instead would look
-      // equivalent and be right only when the tag has no attributes.
-      const shift = body.startPosition.row;
+        // `raw_text` starts immediately after the `>` of the opening tag, so its
+        // row IS the tag's row and the slice begins with that line's newline.
+        // Script line 1 is therefore the tail of the tag line, and script line N
+        // lands on `.vue` line row + N — which is exactly "add the start row to a
+        // 1-based span". Taking the row from the tag node instead would look
+        // equivalent and be right only when the tag has no attributes.
+        const shift = body.startPosition.row;
 
-      // nodes[0] is the script's own file node: it describes the block, not the
-      // file, so it is dropped and its residual folded into the .vue file node.
-      const [scriptFile, ...symbols] = inner.nodes;
-      if (scriptFile?.body_text) residuals.push(scriptFile.body_text);
+        // nodes[0] is the script's own file node: it describes the block, not the
+        // file, so it is dropped and its residual folded into the .vue file node.
+        const [scriptFile, ...symbols] = inner.nodes;
+        if (scriptFile?.body_text) residuals.push(scriptFile.body_text);
 
-      const renamed = new Map<string, string>();
-      for (const node of symbols) {
-        const id = mintId(node.id, minted);
-        if (id !== node.id) renamed.set(node.id, id);
-        nodes.push({ ...node, id, span: shiftSpan(node.span, shift) });
-      }
+        const renamed = new Map<string, string>();
+        for (const node of symbols) {
+          const id = mintId(node.id, minted);
+          if (id !== node.id) renamed.set(node.id, id);
+          nodes.push({ ...node, id, span: shiftSpan(node.span, shift) });
+        }
 
-      for (const edge of inner.rawEdges) {
-        const source_ = renamed.get(edge.source) ?? edge.source;
-        const targetId = edge.targetId === undefined ? undefined : (renamed.get(edge.targetId) ?? edge.targetId);
-        rawEdges.push({ ...edge, source: source_, ...(targetId === undefined ? {} : { targetId }) });
+        for (const edge of inner.rawEdges) {
+          const source_ = renamed.get(edge.source) ?? edge.source;
+          const targetId = edge.targetId === undefined ? undefined : (renamed.get(edge.targetId) ?? edge.targetId);
+          rawEdges.push({ ...edge, source: source_, ...(targetId === undefined ? {} : { targetId }) });
+        }
       }
     }
+  } finally {
+    // Every node above copied its bytes into JS strings, so nothing here still
+    // needs the tree — free the WASM memory it holds (see extractGeneric).
+    tree?.delete();
   }
 
   // Built last so it can carry the residual, but unshifted first so the file node

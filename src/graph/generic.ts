@@ -18,9 +18,10 @@
  * binding pass; the opt-in LSP tier fills that gap for popular languages.
  */
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
+import type * as WebTreeSitter from "web-tree-sitter";
 import { contentHash } from "../util/id.js";
 import type { Kind, NodeV1 } from "./types.js";
 import type { ExtractResult, RawEdge } from "./extract.js";
@@ -87,8 +88,26 @@ const KIND: Record<string, Kind> = {
 // warmGenericGrammars; read synchronously by extractGeneric.
 export interface Loaded { language: unknown; query: unknown | null }
 const loaded = new Map<string, Loaded>();
-let tsMod: typeof import("web-tree-sitter") | null = null;
+let tsMod: typeof WebTreeSitter | null = null;
 let initPromise: Promise<void> | null = null;
+/** The module specifier the runtime was first imported from — the base a restart
+ *  appends `?reset=N` to (see `resetGrammarRuntime`). */
+const WASM_MODULE_URL = pathToFileURL(require.resolve("web-tree-sitter")).href;
+let resetSeq = 0;
+
+/** Handed to Emscripten as its Module object. It writes `Module.HEAPU8` — a view
+ * of the WHOLE WASM memory — onto whatever object it is given, and rewrites it on
+ * every grow, so this object is the one place the shared heap's size is visible.
+ * Every `Parser.init` call must pass it, or the runtime grows invisibly. */
+const MODULE_OPTIONS: Record<string, unknown> = {};
+
+/** Test seam: bytes of the shared web-tree-sitter WASM heap, or null when the
+ * runtime isn't up. A parsed tree lives in this heap until it is deleted; a leak
+ * shows up here as unbounded growth. */
+export function wasmHeapBytes(): number | null {
+  const heap = MODULE_OPTIONS.HEAPU8 as Uint8Array | undefined;
+  return heap ? heap.byteLength : null;
+}
 
 function requireWasm(wasm: string): Buffer | null {
   // Resolve the grammar wasm from the tree-sitter-wasm bundle (its package.json
@@ -125,8 +144,10 @@ export async function warmGenericGrammars(langNames: Iterable<string>): Promise<
   const need = [...want].filter((n) => !loaded.has(n) && GENERIC_LANGS.some((l) => l.name === n));
   if (need.length === 0) return;
   if (!tsMod) {
+    // Dynamic on purpose: the wasm runtime must not be paid for (nor initialised)
+    // by a process that never parses a breadth-tier file. Static import cannot do this.
     tsMod = await import("web-tree-sitter");
-    initPromise = initPromise ?? tsMod.Parser.init();
+    initPromise = initPromise ?? tsMod.Parser.init(MODULE_OPTIONS);
   }
   await initPromise;
   const { Language, Query } = tsMod;
@@ -174,8 +195,10 @@ export function swapGrammarForTest(name: string, entry: Loaded | null): Loaded |
  * Kept here so web-tree-sitter is initialised exactly once per process. */
 export async function loadWasmLanguage(wasm: string): Promise<unknown | null> {
   if (!tsMod) {
+    // Dynamic on purpose, same reason as warmGenericGrammars: a process that never
+    // parses a wasm grammar must not pay for the runtime's heap.
     tsMod = await import("web-tree-sitter");
-    initPromise = initPromise ?? tsMod.Parser.init();
+    initPromise = initPromise ?? tsMod.Parser.init(MODULE_OPTIONS);
   }
   await initPromise;
   const bytes = requireWasm(wasm);
@@ -187,20 +210,53 @@ export async function loadWasmLanguage(wasm: string): Promise<unknown | null> {
   }
 }
 
+/** Tear down the shared web-tree-sitter runtime and bring up a fresh one, dropping
+ * every loaded grammar with it (their handles died with the old heap — callers must
+ * re-warm, which `../graph/extract-recovery.js` does).
+ *
+ * This is the only way out of a dead runtime: an Emscripten abort sets its `ABORT`
+ * flag and never clears it, so every later call on that module instance throws
+ * `Aborted(…)`, and every file parsed after the first one is reported as a parse
+ * failure instead of one heap problem. A restart is a *new module instance* —
+ * `?reset=N` is a distinct specifier, so the ESM registry hands out a fresh module
+ * record with its own Parser class, its own ABORT flag and its own heap. The wasm
+ * itself still resolves next to the JS file (`new URL(…, import.meta.url)` ignores
+ * the query), so the fresh instance finds its binary. */
+export async function resetGrammarRuntime(): Promise<void> {
+  loaded.clear();
+  // Dynamic on purpose: the specifier is only known at runtime.
+  tsMod = (await import(`${WASM_MODULE_URL}?reset=${++resetSeq}`)) as typeof WebTreeSitter;
+  initPromise = tsMod.Parser.init(MODULE_OPTIONS);
+  await initPromise;
+}
+
 const PARSE_CHUNK = 16384; // <32KB slices — same tree-sitter limit workaround as extract.ts
 
-/** Parse with an already-loaded grammar. Returns the root node, or null if the
- * grammar was never warmed or the parse blew up. Companion to
- * `loadWasmLanguage` for callers outside this module. */
-export function parseWasm(language: unknown, source: string): TsNode | null {
+/** Minimal structural view of a web-tree-sitter tree — shared with container.ts.
+ * The tree is the owner of the WASM memory a parse produced; whoever holds this
+ * handle must `delete()` it (see the leak note in `extractGeneric`), which is why
+ * parsing hands back the tree rather than just its root node. */
+export interface TsTree {
+  rootNode: TsNode;
+  delete(): void;
+}
+
+/** Parse with an already-loaded grammar. Returns a handle to the parsed tree (call
+ * `delete()` on it when done), or null if the grammar was never warmed or the
+ * parse blew up. Companion to `loadWasmLanguage` for callers outside this module. */
+export function parseWasm(language: unknown, source: string): TsTree | null {
   if (!tsMod) return null;
+  const parser = new tsMod.Parser();
   try {
-    const parser = new tsMod.Parser();
     parser.setLanguage(language as never);
     const tree = parser.parse((i: number) => source.slice(i, i + PARSE_CHUNK));
-    return (tree?.rootNode as TsNode) ?? null;
+    return (tree as TsTree | null) ?? null;
   } catch {
     return null;
+  } finally {
+    // Same WASM allocation as in extractGeneric: the caller gets the tree, and the
+    // parser handle is freed here rather than leaked per file.
+    parser.delete();
   }
 }
 
@@ -225,9 +281,9 @@ export function extractGeneric(rel: string, source: string, langName: string): E
   const entry = loaded.get(langName);
   if (!entry || !tsMod) return { nodes, rawEdges };
 
-  let tree;
+  let tree: TsTree | null = null;
+  const parser = new tsMod.Parser();
   try {
-    const parser = new tsMod.Parser();
     parser.setLanguage(entry.language as never);
     tree = parser.parse((i: number) => source.slice(i, i + PARSE_CHUNK));
   } catch (err) {
@@ -237,51 +293,67 @@ export function extractGeneric(rel: string, source: string, langName: string): E
     // build.ts records it in `errors`, the CLI prints it, and the extract cache
     // remembers the failure instead of caching an empty result as clean.
     throw new Error(`${langName} grammar threw: ${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    // A Parser is a WASM allocation of its own (`ts_parser_new`), ~13 KiB per
+    // instance on the corpus measured in test/generic-extract.test.ts. One per
+    // file, undeleted, was half of the heap exhaustion that killed the runtime.
+    // The tree it produced does not depend on it, so it goes back now.
+    parser.delete();
   }
   if (!tree) return { nodes, rawEdges };
 
-  const minted = new Set<string>([rel]);
-  const lines = source.split("\n");
-  const defs: Def[] = [];
-  // One definition per source span: a grammar's tags.scm can capture the same node
-  // under two @definition kinds (Swift `func` is method AND function), and the
-  // walker can revisit a nested match — both would emit near-duplicate nodes.
-  const spanSeen = new Set<number>();
-  // Mint one definition node from a whole-definition tree node. Shared by both
-  // the tags.scm path and the walker fallback so id/span/signature/body_text are
-  // built identically.
-  const mkDef = (name: string, kind: Kind, whole: TsNode): void => {
-    if (spanSeen.has(whole.startIndex)) return;
-    spanSeen.add(whole.startIndex);
-    const idBase = `${rel}#${name}`;
-    let id = idBase, n = 2;
-    while (minted.has(id)) id = `${idBase}~${n++}`;
-    minted.add(id);
-    const startRow = whole.startPosition.row, endRow = whole.endPosition.row;
-    const sigLine = (lines[startRow] ?? "").trim().replace(/\s*\{?\s*$/, "");
-    nodes.push({
-      id, name, kind, path: rel,
-      span: `L${startRow + 1}-L${endRow + 1}`,
-      signature: sigLine || null, exported: true, origin: "generic",
-      body_hash: contentHash(source.slice(whole.startIndex, whole.endIndex)),
-      body_text: source.slice(whole.startIndex, whole.endIndex).replace(/\s+/g, " ").slice(0, 5000),
-      summary_state: "pending", summary: null, crux: null,
-    });
-    defs.push({ id, startIndex: whole.startIndex, endIndex: whole.endIndex });
-  };
+  // The parsed tree owns WASM memory the JS GC cannot reclaim on its own: nothing
+  // else holds it, and every node this walker emits copies its bytes into JS
+  // strings, so no TsNode escapes. Free it here — on the success path AND on a
+  // thrown walker/query error — or one tree per file accumulates in a 2 GiB
+  // wasm32 heap until the allocator aborts and the whole runtime latches dead
+  // (see test/generic-extract.test.ts, "frees parsed trees").
+  try {
+    const minted = new Set<string>([rel]);
+    const lines = source.split("\n");
+    const defs: Def[] = [];
+    // One definition per source span: a grammar's tags.scm can capture the same node
+    // under two @definition kinds (Swift `func` is method AND function), and the
+    // walker can revisit a nested match — both would emit near-duplicate nodes.
+    const spanSeen = new Set<number>();
+    // Mint one definition node from a whole-definition tree node. Shared by both
+    // the tags.scm path and the walker fallback so id/span/signature/body_text are
+    // built identically.
+    const mkDef = (name: string, kind: Kind, whole: TsNode): void => {
+      if (spanSeen.has(whole.startIndex)) return;
+      spanSeen.add(whole.startIndex);
+      const idBase = `${rel}#${name}`;
+      let id = idBase, n = 2;
+      while (minted.has(id)) id = `${idBase}~${n++}`;
+      minted.add(id);
+      const startRow = whole.startPosition.row, endRow = whole.endPosition.row;
+      const sigLine = (lines[startRow] ?? "").trim().replace(/\s*\{?\s*$/, "");
+      nodes.push({
+        id, name, kind, path: rel,
+        span: `L${startRow + 1}-L${endRow + 1}`,
+        signature: sigLine || null, exported: true, origin: "generic",
+        body_hash: contentHash(source.slice(whole.startIndex, whole.endIndex)),
+        body_text: source.slice(whole.startIndex, whole.endIndex).replace(/\s+/g, " ").slice(0, 5000),
+        summary_state: "pending", summary: null, crux: null,
+      });
+      defs.push({ id, startIndex: whole.startIndex, endIndex: whole.endIndex });
+    };
 
-  if (entry.query) {
-    tagsExtract(entry.query, tree.rootNode as TsNode, rel, mkDef, defs, rawEdges, langName);
-  } else {
-    walkExtract(tree.rootNode as TsNode, mkDef); // no tags.scm → symbols only
+    if (entry.query) {
+      tagsExtract(entry.query, tree.rootNode as TsNode, rel, mkDef, defs, rawEdges, langName);
+    } else {
+      walkExtract(tree.rootNode as TsNode, mkDef); // no tags.scm → symbols only
+    }
+    // The preprocessor is invisible to tags.scm, but in C/C++ a local `#include "x.h"`
+    // IS the dependency graph — capture it as a file→file import. Likewise a Rust
+    // `use crate::…` is an in-crate module dependency.
+    if (langName === "c" || langName === "cpp") extractIncludes(tree.rootNode as TsNode, rel, rawEdges);
+    else if (langName === "rust") extractUses(tree.rootNode as TsNode, rel, rawEdges);
+    else if (langName === "php") extractPhpUses(tree.rootNode as TsNode, rel, rawEdges);
+    return { nodes, rawEdges };
+  } finally {
+    tree.delete();
   }
-  // The preprocessor is invisible to tags.scm, but in C/C++ a local `#include "x.h"`
-  // IS the dependency graph — capture it as a file→file import. Likewise a Rust
-  // `use crate::…` is an in-crate module dependency.
-  if (langName === "c" || langName === "cpp") extractIncludes(tree.rootNode as TsNode, rel, rawEdges);
-  else if (langName === "rust") extractUses(tree.rootNode as TsNode, rel, rawEdges);
-  else if (langName === "php") extractPhpUses(tree.rootNode as TsNode, rel, rawEdges);
-  return { nodes, rawEdges };
 }
 
 /** PHP `use App\Models\User;` → a file→class-file `imports` raw edge, one per imported
@@ -289,16 +361,20 @@ export function extractGeneric(rel: string, source: string, langName: string): E
  * those name a symbol, not a PSR-4 class file. resolve.ts settles the fully-qualified
  * name to the in-repo file by namespace suffix, and drops it when it can't. */
 function extractPhpUses(root: TsNode, rel: string, rawEdges: RawEdge[]): void {
-  const visit = (n: TsNode): void => {
+  // Iterative (children pushed in reverse → pre-order), like `walkExtract`: a
+  // recursive walk dies on a deep enough tree.
+  const stack: TsNode[] = [root];
+  while (stack.length) {
+    const n = stack.pop()!;
     if (n.type === "namespace_use_declaration") {
       for (const fqn of phpUseNames(n.text)) rawEdges.push({ source: rel, relation: "imports", specifier: fqn, file: rel });
     }
-    for (let i = 0; i < (n.namedChildCount ?? 0); i++) {
+    const count = n.namedChildCount ?? 0;
+    for (let i = count - 1; i >= 0; i--) {
       const c = n.namedChild?.(i);
-      if (c) visit(c);
+      if (c) stack.push(c);
     }
-  };
-  visit(root);
+  }
 }
 
 /** The fully-qualified class names a PHP `use` declaration imports. Handles a plain
@@ -322,17 +398,19 @@ function phpUseNames(text: string): string[] {
  * `super::`, `self::`, external crates, and globs are skipped — resolve.ts settles the
  * path against the file's crate root, and drops it when it can't. */
 function extractUses(root: TsNode, rel: string, rawEdges: RawEdge[]): void {
-  const visit = (n: TsNode): void => {
+  const stack: TsNode[] = [root];
+  while (stack.length) {
+    const n = stack.pop()!;
     if (n.type === "use_declaration") {
       const spec = rustUseModule(n.text);
       if (spec !== null) rawEdges.push({ source: rel, relation: "imports", specifier: spec ? `crate/${spec}` : "crate", file: rel });
     }
-    for (let i = 0; i < (n.namedChildCount ?? 0); i++) {
+    const count = n.namedChildCount ?? 0;
+    for (let i = count - 1; i >= 0; i--) {
       const c = n.namedChild?.(i);
-      if (c) visit(c);
+      if (c) stack.push(c);
     }
-  };
-  visit(root);
+  }
 }
 
 /** The crate-relative path a Rust `use crate::…` names (`::`→`/`), or null when it is not
@@ -357,7 +435,9 @@ function rustUseModule(text: string): string | null {
  * in-repo header (relative to the including file, else a unique path-suffix match), and
  * keeps it as an external string when it cannot — never a guessed edge. */
 function extractIncludes(root: TsNode, rel: string, rawEdges: RawEdge[]): void {
-  const visit = (n: TsNode): void => {
+  const stack: TsNode[] = [root];
+  while (stack.length) {
+    const n = stack.pop()!;
     if (n.type === "preproc_include") {
       const raw = n.childForFieldName?.("path")?.text ?? "";
       if (raw.startsWith('"')) {
@@ -365,12 +445,12 @@ function extractIncludes(root: TsNode, rel: string, rawEdges: RawEdge[]): void {
         if (spec) rawEdges.push({ source: rel, relation: "imports", specifier: spec, file: rel });
       }
     }
-    for (let i = 0; i < (n.namedChildCount ?? 0); i++) {
+    const count = n.namedChildCount ?? 0;
+    for (let i = count - 1; i >= 0; i--) {
       const c = n.namedChild?.(i);
-      if (c) visit(c);
+      if (c) stack.push(c);
     }
-  };
-  visit(root);
+  }
 }
 
 /** tags.scm path: @definition.<kind> → nodes, @reference.call/@reference.send →
@@ -469,20 +549,27 @@ function nodeName(node: TsNode): string | null {
   return null;
 }
 /** Walker fallback: DFS every named node, emit a def for each classified one
- * (symbols only — no call resolution without a query). */
+ * (symbols only — no call resolution without a query).
+ *
+ * Iterative, and pre-order like the recursion it replaces (children pushed in
+ * reverse so they pop in document order): a recursive visit overflows V8's stack on
+ * a deep enough tree — a generated C model at 76k nesting levels did — and a stack
+ * overflow in a walker is indistinguishable, to the caller, from a parse failure. */
 function walkExtract(root: TsNode, mkDef: (name: string, kind: Kind, whole: TsNode) => void): void {
-  const visit = (n: TsNode): void => {
+  const stack: TsNode[] = [root];
+  while (stack.length) {
+    const n = stack.pop()!;
     const kind = classifyKind(n.type);
     if (kind) {
       const name = nodeName(n);
       if (name) mkDef(name, kind, n);
     }
-    for (let i = 0; i < (n.namedChildCount ?? 0); i++) {
+    const count = n.namedChildCount ?? 0;
+    for (let i = count - 1; i >= 0; i--) {
       const c = n.namedChild?.(i);
-      if (c) visit(c);
+      if (c) stack.push(c);
     }
-  };
-  visit(root);
+  }
 }
 
 /** Minimal structural view of a web-tree-sitter node — shared with container.ts. */

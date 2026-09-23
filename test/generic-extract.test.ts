@@ -16,9 +16,13 @@ import {
   isWarm,
   loadWasmLanguage,
   parseWasm,
+  resetGrammarRuntime,
   swapGrammarForTest,
+  wasmHeapBytes,
   type TsNode,
 } from "../src/graph/generic.js";
+import { extractResilient } from "../src/graph/extract-recovery.js";
+import { readExtractCache } from "../src/graph/extract-cache.js";
 import { resolveEdges } from "../src/graph/resolve.js";
 import { buildGraph } from "../src/graph/build.js";
 import { readGraph, wiringPath } from "../src/graph/write.js";
@@ -397,13 +401,18 @@ function namedOfType(root: TsNode, type: string): string[] {
 async function assertPhpWasmExtractsClassAndMethods(source: string, className: string, label: string): Promise<void> {
   const language = await loadWasmLanguage("php");
   assert.ok(language, "tree-sitter-wasm must ship a php grammar");
-  const root = parseWasm(language, source);
-  assert.ok(root, `${label}: PHP wasm parse must not crash (1.1.4 threw on heredoc/nowdoc)`);
-  const classes = namedOfType(root, "class_declaration");
-  const methods = namedOfType(root, "method_declaration");
-  assert.ok(classes.includes(className), `${label}: expected class ${className}, got: ${classes.join(", ") || "(none)"}`);
-  assert.ok(methods.includes("sql"), `${label}: expected method sql, got: ${methods.join(", ") || "(none)"}`);
-  assert.ok(methods.includes("other"), `${label}: expected method other, got: ${methods.join(", ") || "(none)"}`);
+  const tree = parseWasm(language, source);
+  assert.ok(tree, `${label}: PHP wasm parse must not crash (1.1.4 threw on heredoc/nowdoc)`);
+  try {
+    const root = tree.rootNode;
+    const classes = namedOfType(root, "class_declaration");
+    const methods = namedOfType(root, "method_declaration");
+    assert.ok(classes.includes(className), `${label}: expected class ${className}, got: ${classes.join(", ") || "(none)"}`);
+    assert.ok(methods.includes("sql"), `${label}: expected method sql, got: ${methods.join(", ") || "(none)"}`);
+    assert.ok(methods.includes("other"), `${label}: expected method other, got: ${methods.join(", ") || "(none)"}`);
+  } finally {
+    tree.delete(); // the tree owns WASM memory — the parse is read; the handle goes back
+  }
 }
 
 test("PHP wasm grammar extracts class + methods from a heredoc file (#139)", async () => {
@@ -412,6 +421,26 @@ test("PHP wasm grammar extracts class + methods from a heredoc file (#139)", asy
 
 test("PHP wasm grammar extracts class + methods from a nowdoc file (#139)", async () => {
   await assertPhpWasmExtractsClassAndMethods(PHP_NOWDOC, "WithNowdoc", "nowdoc");
+});
+
+// A parsed tree is owned by the shared web-tree-sitter heap until someone deletes
+// it, and that heap is a wasm32 memory with a hard 2048 MiB ceiling. Leaking one
+// tree per file (no free) grew it ~98 KiB per parse on a real corpus until the C
+// allocator aborted — and Emscripten's abort flag then latched for the whole
+// process, turning one exhausted heap into a "parse failed" line for every file
+// after it. This pins the free: a fixed amount of parsing must not grow the heap.
+test("extractGeneric frees parsed trees (the WASM heap does not grow)", async () => {
+  await warmGenericGrammars(["rust"]);
+  const src = RUST.repeat(40); // ~1.8 KB, enough tree per parse to see the leak
+  for (let i = 0; i < 200; i++) extractGeneric("lib.rs", src, "rust"); // warm up
+  const before = wasmHeapBytes();
+  assert.ok(before !== null && before > 0, "the WASM heap must be observable");
+  for (let i = 0; i < 5000; i++) extractGeneric("lib.rs", src, "rust");
+  const after = wasmHeapBytes()!;
+  assert.ok(
+    after - before < 8 * 1024 * 1024,
+    `heap grew ${Math.round((after - before) / 1048576)} MiB over 5000 parses — trees are not freed`,
+  );
 });
 
 /**
@@ -471,3 +500,90 @@ test("a throwing grammar is a per-file build error, cached as a failure (#139)",
     swapGrammarForTest("rust", prev);
   }
 });
+
+/**
+ * An Emscripten abort (heap exhaustion) latches the shared WASM runtime dead: every
+ * parse after it throws `Aborted(…)`, so one bad file used to be reported as 911
+ * per-file failures and memoized that way. The runtime cannot be revived in place —
+ * `resetGrammarRuntime` swaps in a fresh module instance — and the file that found
+ * the dead runtime is re-parsed on the new one. A deterministically aborting fake
+ * stands in for the real exhaustion, exactly as the #139 fake stands in for the
+ * heap-state-dependent PHP crash.
+ */
+const ABORTING_GRAMMAR = {
+  language: new Proxy({}, { get(): never { throw new Error("Aborted(). Build with -sASSERTIONS for more info."); } }),
+  query: null,
+};
+
+test("an aborted runtime is restarted, not reported as a failure for every later file", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "graft-abort-restart-"));
+  writeFileSync(join(dir, "a.rs"), RUST);
+  writeFileSync(join(dir, "b.rs"), RUST);
+  await warmGenericGrammars(["rust"]); // so buildGraph's own warm call is a no-op
+  swapGrammarForTest("rust", ABORTING_GRAMMAR);
+  // No restore: the restart below abandoned the instance this fake (and every
+  // handle warmed before it) belonged to; the fresh one is left with the real
+  // grammar the restart re-warmed.
+  const r = await buildGraph(dir, { reuse: false });
+  assert.deepEqual(r.errors, [], `no parse failures (got: ${r.errors.join("; ")})`);
+  assert.equal(r.parsed, 2, "both files were parsed");
+  const g = readGraph(wiringPath(contextDirFor(dir)));
+  assert.ok(g, "graph built");
+  for (const rel of ["a.rs", "b.rs"]) {
+    assert.ok(g!.nodes.some((n) => n.path === rel && n.kind === "file"), `${rel} is in the graph`);
+    assert.ok(g!.nodes.some((n) => n.path === rel && n.kind !== "file"), `${rel} contributed its symbols`);
+  }
+  const cache = readExtractCache(contextDirFor(dir));
+  for (const rel of ["a.rs", "b.rs"]) {
+    assert.ok(!cache.files[rel]?.error, `${rel} is not memoized as a failure`);
+    assert.ok((cache.files[rel]?.nodes.length ?? 0) > 1, `${rel} kept its parsed nodes in the cache`);
+  }
+});
+
+test("resetGrammarRuntime drops the old instance's grammars; the fresh one re-warms usable", async () => {
+  await warmGenericGrammars(["rust"]); // an "old" instance to replace
+  swapGrammarForTest("rust", ABORTING_GRAMMAR); // ...with a poisoned entry in it
+  await resetGrammarRuntime();
+  assert.equal(isWarm("rust"), false, "grammars minted by the abandoned runtime are gone");
+  await warmGenericGrammars(["rust"]); // a loaded grammar is a handle into the new heap
+  const { nodes } = extractGeneric("lib.rs", RUST, "rust");
+  assert.deepEqual(
+    nodes.filter((n) => n.kind !== "file").map((n) => n.name).sort(),
+    ["Config", "helper", "load", "parse"],
+    "the fresh instance parses for real",
+  );
+});
+
+test("extractResilient retries once after a restart, and never past the budget", async () => {
+  await warmGenericGrammars(["rust"]);
+  const prev = swapGrammarForTest("rust", ABORTING_GRAMMAR);
+  try {
+    // A restart that re-warms nothing leaves the same fake in place, so the retry
+    // aborts again: one restart, one re-attempt, then the error is the caller's.
+    const budget = { used: 0, max: 5 };
+    let restarts = 0;
+    await assert.rejects(
+      extractResilient("lib.rs", RUST, { generic: "rust" }, {
+        restart: async () => { restarts++; },
+        budget,
+      }),
+      /Aborted\(\)/,
+    );
+    assert.equal(restarts, 1, "exactly one restart — the retry, not a loop");
+    assert.equal(budget.used, 1);
+
+    // An exhausted budget must not spend (or attempt) a restart at all.
+    let exhaustedRestarts = 0;
+    await assert.rejects(
+      extractResilient("lib.rs", RUST, { generic: "rust" }, {
+        restart: async () => { exhaustedRestarts++; },
+        budget: { used: 5, max: 5 },
+      }),
+      /Aborted\(\)/,
+    );
+    assert.equal(exhaustedRestarts, 0, "no restart past the budget");
+  } finally {
+    swapGrammarForTest("rust", prev); // nothing restarted the runtime here
+  }
+});
+

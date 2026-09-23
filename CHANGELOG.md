@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- **One exhausted grammar heap no longer reads as a parse failure for every file
+  after it**: each parse leaked its tree and its `Parser` handle into the shared
+  `web-tree-sitter` heap (a wasm32 memory with a hard 2 GiB ceiling), so a large
+  repo grew the heap until the C allocator aborted — and Emscripten's abort flag
+  then latched for the whole process, turning one heap problem into a
+  `parse failed` line for each remaining file and memoizing each one as that
+  file's own failure. Trees and parser handles are freed per parse, an abort now
+  restarts the runtime (a fresh module instance) and re-parses the file that hit
+  it, and the tree walkers are iterative so a deeply nested tree (a generated C
+  model at 76k levels) can no longer overflow the stack.
 - **Thinking-mode endpoints negotiate the forced `tool_choice` 400**: an
   Anthropic-compatible endpoint whose model runs in thinking mode by default
   (DeepSeek's, with "Thinking mode does not support this tool_choice") now gets

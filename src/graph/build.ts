@@ -17,9 +17,15 @@ import { readFileSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import { walkDir } from "../ingest/fs.js";
 import { contextDirFor, ensureGitignored, ensureSearchable } from "../context/node-file.js";
-import { extractFile, languageLabelOf, languageOf, type RawEdge } from "./extract.js";
-import { extractGeneric, genericLangOf, warmGenericGrammars } from "./generic.js";
-import { containerLangOf, extractContainer, warmContainerGrammars } from "./container.js";
+import { languageLabelOf, languageOf, type RawEdge } from "./extract.js";
+import { genericLangOf, warmGenericGrammars } from "./generic.js";
+import { containerLangOf, warmContainerGrammars } from "./container.js";
+import {
+  extractResilient,
+  isRuntimeAbort,
+  restartWasmRuntime,
+  type RestartBudget,
+} from "./extract-recovery.js";
 import { contentHash } from "../util/id.js";
 import { relPosix } from "../util/paths.js";
 import { readSourceFile } from "../util/source.js";
@@ -193,16 +199,19 @@ export async function buildGraph(
   // Breadth tier: WASM grammars load asynchronously, so warm the ones this repo
   // needs ONCE here (buildGraph is async) before the synchronous parse loop below
   // can call extractGeneric. Depth-tier (native) grammars need no warmup.
-  await warmGenericGrammars(
-    new Set(files.map((f) => genericLangOf(f.abs)?.name).filter((n): n is string => !!n)),
-  );
+  const genericNames = new Set(files.map((f) => genericLangOf(f.abs)?.name).filter((n): n is string => !!n));
+  await warmGenericGrammars(genericNames);
   // Container tier (.vue and friends) loads its wrapper grammars the same way,
   // for the same reason: extractContainer runs inside the sync loop below.
-  await warmContainerGrammars(
-    new Set(files.map((f) => containerLangOf(f.abs)?.name).filter((n): n is string => !!n)),
-  );
+  const containerNames = new Set(files.map((f) => containerLangOf(f.abs)?.name).filter((n): n is string => !!n));
+  await warmContainerGrammars(containerNames);
+  // All of the above share one wasm32 runtime. A heap exhaustion latches it dead
+  // for the rest of the process, so the loop below recovers by restarting it (see
+  // extract-recovery.ts) instead of reporting every later file as a parse failure.
+  const restartBudget: RestartBudget = { used: 0, max: 5 };
+  const restart = () => restartWasmRuntime(genericNames, containerNames);
 
-  files.forEach((f, i) => {
+  for (const [i, f] of files.entries()) {
     const rel = f.rel;
     opts.onProgress?.({ phase: "parse", index: i, total: files.length, file: rel });
     // Depth tier (hand-written, native grammar) if a language claims the file;
@@ -234,13 +243,13 @@ export async function buildGraph(
       // Record it anyway (with the stat we do have) so the freshness probe's
       // fast path doesn't report this file as new on every single query.
       entries[rel] = { size: f.size, mtimeMs: f.mtimeMs, hash: "", nodes: [], rawEdges: [], error: message };
-      return;
+      continue;
     }
     if (source === null) {
       // Unsupported encoding (UTF-16BE) — a skip, never an error: recorded with
       // an empty entry so the freshness probe doesn't treat it as new every run.
       entries[rel] = { size: f.size, mtimeMs: f.mtimeMs, hash: "", nodes: [], rawEdges: [] };
-      return;
+      continue;
     }
 
     const hash = contentHash(source);
@@ -250,32 +259,53 @@ export async function buildGraph(
       reused++;
       if (cached.error) {
         errors.push(cached.error); // this file failed to parse last time too
-        return;
+        continue;
       }
       nodes.push(...cached.nodes);
       rawEdges.push(...cached.rawEdges);
       langs.add(label);
-      return;
+      continue;
     }
 
     parsed++;
+    let fileNodes: NodeV1[];
+    let fileEdges: RawEdge[];
     try {
-      const { nodes: fileNodes, rawEdges: fileEdges } = lang
-        ? extractFile(rel, source, lang)
-        : container
-          ? extractContainer(rel, source, container)
-          : extractGeneric(rel, source, generic!.name);
-      nodes.push(...fileNodes);
-      rawEdges.push(...fileEdges);
-      sources.set(rel, source);
-      langs.add(label);
-      entries[rel] = { size: f.size, mtimeMs: f.mtimeMs, hash, nodes: fileNodes, rawEdges: fileEdges };
+      const r = await extractResilient(
+        rel, source,
+        { depth: lang ?? undefined, generic: generic?.name, container: container ?? undefined },
+        { restart, budget: restartBudget },
+      );
+      fileNodes = r.nodes;
+      fileEdges = r.rawEdges;
     } catch (err) {
       const message = `${rel}: parse failed — ${err instanceof Error ? err.message : String(err)}`;
       errors.push(message);
+      // A file that aborts the runtime TWICE is not collateral state: with the
+      // runtime freshly restarted under it, it is the file that kills the parser.
+      // Keep the #139 policy for it — remember the failure — rather than caching
+      // an empty parse as clean. Everything else the abort took down was already
+      // recovered by the restart above.
       entries[rel] = { size: f.size, mtimeMs: f.mtimeMs, hash, nodes: [], rawEdges: [], error: message };
+      if (isRuntimeAbort(err) && restartBudget.used >= restartBudget.max) {
+        // Out of restarts: the runtime dies faster than it can be revived, so
+        // every remaining file would be misrecorded as unparseable. Stop and say
+        // so — the files after this one get no entry (and no fingerprint record),
+        // so the next build sees them as drift and parses them.
+        errors.push(
+          `the grammar runtime aborted ${restartBudget.max} times — stopped parsing; ` +
+            `${files.length - i - 1} files were not parsed (re-run \`graft build\`)`,
+        );
+        break;
+      }
+      continue;
     }
-  });
+    nodes.push(...fileNodes);
+    rawEdges.push(...fileEdges);
+    sources.set(rel, source);
+    langs.add(label);
+    entries[rel] = { size: f.size, mtimeMs: f.mtimeMs, hash, nodes: fileNodes, rawEdges: fileEdges };
+  }
 
   // Persist the memo BEFORE enrichment, because `enrichGraph` mutates these very
   // node objects (summary/crux/summary_state) and the cache must only ever hold

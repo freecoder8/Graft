@@ -20,9 +20,10 @@
 import { resolve } from "node:path";
 import { relPosix } from "../util/paths.js";
 import { contextDirFor } from "../context/node-file.js";
-import { extractFile, languageOf } from "./extract.js";
-import { extractGeneric, genericLangOf, warmGenericGrammars } from "./generic.js";
-import { containerLangOf, extractContainer, warmContainerGrammars } from "./container.js";
+import { languageOf } from "./extract.js";
+import { genericLangOf, warmGenericGrammars } from "./generic.js";
+import { containerLangOf, warmContainerGrammars } from "./container.js";
+import { extractResilient, isRuntimeAbort, restartWasmRuntime, type RestartBudget } from "./extract-recovery.js";
 import { listSourceFiles } from "./build.js";
 import { readGraph, wiringPath } from "./write.js";
 import { readFingerprint } from "./fingerprint.js";
@@ -87,16 +88,19 @@ export async function checkGraph(
   const fpOnlyDirs = readFingerprint(outDir)?.onlyDirs;
   const onlyDirs = fpOnlyDirs && fpOnlyDirs.length > 0 ? new Set(fpOnlyDirs) : undefined;
   const sourceFiles = listSourceFiles(root, outDir, undefined, onlyDirs);
-  await warmGenericGrammars(
-    new Set(sourceFiles.map((f) => genericLangOf(f)?.name).filter((n): n is string => !!n)),
-  );
+  const genericNames = new Set(sourceFiles.map((f) => genericLangOf(f)?.name).filter((n): n is string => !!n));
+  await warmGenericGrammars(genericNames);
   // Container-tier grammars need the same warmup as the generic ones, for the same
   // reason: extraction below is synchronous. Missing this is what made `graft
   // check` report every `.vue` node as `removed` right after a clean build (#236)
   // — the tier extracted fine, and then the check had no branch that could see it.
-  await warmContainerGrammars(
-    new Set(sourceFiles.map((f) => containerLangOf(f)?.name).filter((n): n is string => !!n)),
-  );
+  const containerNames = new Set(sourceFiles.map((f) => containerLangOf(f)?.name).filter((n): n is string => !!n));
+  await warmContainerGrammars(containerNames);
+  // Same runtime as the build: an abort latched here would make every remaining
+  // file re-extract empty and read as `removed` against a graph that has it, so a
+  // dead runtime is restarted (extract-recovery.ts) rather than diffed against.
+  const budget: RestartBudget = { used: 0, max: 5 };
+  const restart = () => restartWasmRuntime(genericNames, containerNames);
   const current = new Map<string, string>(); // id → body_hash
   for (const file of sourceFiles) {
     // The same three-way branch `buildGraph` uses, in the same order. The two must
@@ -114,23 +118,24 @@ export async function checkGraph(
     }
     if (source === null) continue; // unsupported encoding (e.g. UTF-16BE)
     const rel = relPosix(root, file);
+    // No tier claims this file. Spelled out rather than asserted away: the
+    // `generic!` that used to stand in this position threw a TypeError on a
+    // container-tier file, the catch below swallowed it as a parse failure, and
+    // a missing branch became a silent permanent `removed` (#236).
+    if (!lang && !container && !generic) continue;
     try {
-      const extracted = lang
-        ? extractFile(rel, source, lang)
-        : container
-          ? extractContainer(rel, source, container)
-          : generic
-            ? extractGeneric(rel, source, generic.name)
-            : null;
-      // No tier claims this file. Spelled out rather than asserted away: the
-      // `generic!` that used to stand in this position threw a TypeError on a
-      // container-tier file, the catch below swallowed it as a parse failure, and
-      // a missing branch became a silent permanent `removed` (#236). Returning
-      // null here means the next tier graft gains fails loudly in the type
-      // checker instead.
-      if (extracted === null) continue;
+      const extracted = await extractResilient(
+        rel, source,
+        { depth: lang ?? undefined, container: container ?? undefined, generic: generic?.name },
+        { restart, budget },
+      );
       for (const n of extracted.nodes) current.set(n.id, n.body_hash);
-    } catch {
+    } catch (err) {
+      if (isRuntimeAbort(err) && budget.used >= budget.max) {
+        // Running on would report a removed-everywhere diff that describes the
+        // dead runtime, not the code. Fail the check instead.
+        throw new Error("graft check: the tree-sitter WASM runtime aborted and could not be restarted — re-run");
+      }
       // parse failure → skip; the committed nodes for this file become `removed`.
     }
   }
